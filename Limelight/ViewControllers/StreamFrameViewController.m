@@ -784,6 +784,38 @@
     return YES;
 }
 
+// Moonlight Bureau: the stream can be used in portrait, like Chrome Remote Desktop
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    return UIInterfaceOrientationMaskAllButUpsideDown;
+}
+
+- (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
+    [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
+    [_scrollView setZoomScale:1.0 animated:NO];
+    [coordinator animateAlongsideTransition:nil completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+        [self bureauFitStreamView];
+    }];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    [self bureauFitStreamView];
+}
+
+// Stream view = whole screen at zoom 1 (the scroll view was sized once at creation)
+- (void)bureauFitStreamView {
+    if (_scrollView == nil) {
+        _streamView.frame = self.view.bounds;
+        return;
+    }
+    _scrollView.frame = self.view.bounds;
+    if (_scrollView.zoomScale <= 1.001f && !CGRectEqualToRect(_streamView.frame, _scrollView.bounds)) {
+        _streamView.frame = CGRectMake(0, 0, _scrollView.bounds.size.width, _scrollView.bounds.size.height);
+        _scrollView.contentSize = _scrollView.bounds.size;
+        [_streamView setNeedsLayout];
+    }
+}
+
 - (BOOL)prefersPointerLocked {
     // Pointer lock breaks the UIKit mouse APIs, which is a problem because
     // GCMouse is horribly broken on iOS 14.0 for certain mice. Only lock
@@ -1217,3 +1249,20 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
 #endif
 
 @end
+
+#if !TARGET_OS_TV
+// Moonlight Bureau: containers ask the visible screen which orientations it supports
+// (navigation controller -> top screen, reveal controller -> front screen).
+@implementation UINavigationController (MoonlightBureauOrientation)
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    return self.topViewController ? self.topViewController.supportedInterfaceOrientations : UIInterfaceOrientationMaskLandscape;
+}
+@end
+
+#import "SWRevealViewController.h"
+@implementation SWRevealViewController (MoonlightBureauOrientation)
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    return self.frontViewController ? self.frontViewController.supportedInterfaceOrientations : UIInterfaceOrientationMaskLandscape;
+}
+@end
+#endif

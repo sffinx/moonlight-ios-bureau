@@ -7,6 +7,7 @@
 //
 
 #import "StreamView.h"
+#import <AVFoundation/AVFoundation.h>
 #include <Limelight.h>
 #import "DataManager.h"
 #import "ControllerSupport.h"
@@ -175,6 +176,24 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
         return [onScreenControls getLevel];
     }
 }
+
+#if !TARGET_OS_TV
+// Moonlight Bureau: portrait support, the video layer is fitted (letterboxed) again when
+// the view size changes, like the initial sizing in VideoDecoderRenderer.
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGSize videoSize = [self getVideoAreaSize];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    for (CALayer *layer in self.layer.sublayers) {
+        if ([layer isKindOfClass:[AVSampleBufferDisplayLayer class]]) {
+            layer.position = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
+            layer.bounds = CGRectMake(0, 0, videoSize.width, videoSize.height);
+        }
+    }
+    [CATransaction commit];
+}
+#endif
 
 - (CGSize) getVideoAreaSize {
     if (self.bounds.size.width > self.bounds.size.height * streamAspectRatio) {

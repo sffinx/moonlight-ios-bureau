@@ -37,6 +37,7 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
 #if !TARGET_OS_TV
     CGPoint cursorLocation;
     BOOL cursorKnown;
+    CGRect cursorArea;                 // video area the cursor position refers to
     CFTimeInterval lastMoveTime;
     CGPoint velocity;                  // points per second, smoothed
     CADisplayLink* flingLink;
@@ -126,6 +127,15 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
     }
     CGPoint origin = CGPointMake(view.bounds.size.width / 2 - videoSize.width / 2,
                                  view.bounds.size.height / 2 - videoSize.height / 2);
+
+    // Rotation (portrait/landscape) changes the video area: keep the same relative position
+    CGRect area = CGRectMake(origin.x, origin.y, videoSize.width, videoSize.height);
+    if (cursorKnown && !CGRectEqualToRect(area, cursorArea) && cursorArea.size.width > 0 && cursorArea.size.height > 0) {
+        CGFloat rx = (cursorLocation.x - cursorArea.origin.x) / cursorArea.size.width;
+        CGFloat ry = (cursorLocation.y - cursorArea.origin.y) / cursorArea.size.height;
+        cursorLocation = CGPointMake(area.origin.x + rx * area.size.width, area.origin.y + ry * area.size.height);
+    }
+    cursorArea = area;
 
     // The host cursor position is unknown at the start: begin in the middle of the screen.
     if (!cursorKnown) {

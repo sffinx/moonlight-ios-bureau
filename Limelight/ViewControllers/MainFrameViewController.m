@@ -1099,9 +1099,22 @@ static NSMutableSet* hostList;
     [_discMan stopDiscovery];
 }
 
+#if !TARGET_OS_TV
+// Moonlight Bureau: only the stream can be used in portrait; host list and settings stay landscape
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    return UIInterfaceOrientationMaskLandscape;
+}
+#endif
+
 - (void)viewDidAppear:(BOOL)animated
 {
     [super viewDidAppear:animated];
+#if !TARGET_OS_TV
+    if (@available(iOS 16.0, *)) {
+        [self.navigationController setNeedsUpdateOfSupportedInterfaceOrientations];
+        [self setNeedsUpdateOfSupportedInterfaceOrientations];
+    }
+#endif
 
 #if !TARGET_OS_TV
     // Moonlight Bureau: default phone profile on first launch
