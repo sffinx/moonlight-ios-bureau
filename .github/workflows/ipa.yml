@@ -49,7 +49,11 @@ jobs:
           mkdir Payload
           cp -R "$APP" Payload/
           # Numéro de build = numéro de run : SideStore exige qu'il corresponde au buildVersion de la source
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "Payload/$(basename "$APP")/Info.plist"
+          PLIST="Payload/$(basename "$APP")/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "$PLIST"
+          # Version unique par build : certaines versions de SideStore ne comparent que la version
+          BASE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST")
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${BASE}.${{ github.run_number }}" "$PLIST"
           zip -qry MoonlightBureau.ipa Payload
           ls -l MoonlightBureau.ipa
           shasum -a 256 MoonlightBureau.ipa
