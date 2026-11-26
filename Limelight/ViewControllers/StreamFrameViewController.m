@@ -65,6 +65,7 @@
     BOOL _bureauCursorKnown;
     CGPoint _bureauZoomAnchor;
     BOOL _bureauZoomAnchored;
+    UIButton *_bureauRotationButton;
 #endif
 }
 
@@ -784,9 +785,45 @@
     return YES;
 }
 
-// Moonlight Bureau: the stream can be used in portrait, like Chrome Remote Desktop
+// Moonlight Bureau: the stream follows the phone (portrait or landscape, like Chrome Remote
+// Desktop), or stays locked in the orientation chosen with the toolbar's lock button.
+static NSString *const BUREAU_ORIENTATION_LOCK_KEY = @"MoonlightBureauOrientationLock";
+
+- (UIInterfaceOrientationMask)bureauOrientationLock {
+    return (UIInterfaceOrientationMask)[[NSUserDefaults standardUserDefaults] integerForKey:BUREAU_ORIENTATION_LOCK_KEY];
+}
+
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
-    return UIInterfaceOrientationMaskAllButUpsideDown;
+    UIInterfaceOrientationMask lock = [self bureauOrientationLock];
+    return lock != 0 ? lock : UIInterfaceOrientationMaskAllButUpsideDown;
+}
+
+- (void)bureauApplyOrientationLock {
+    UIInterfaceOrientationMask lock = [self bureauOrientationLock];
+    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightMedium];
+    [_bureauRotationButton setImage:[UIImage systemImageNamed:(lock != 0 ? @"lock.rotation" : @"lock.rotation.open") withConfiguration:config]
+                           forState:UIControlStateNormal];
+    _bureauRotationButton.tintColor = lock != 0 ? UIColor.systemYellowColor : UIColor.whiteColor;
+    if (@available(iOS 16.0, *)) {
+        [self setNeedsUpdateOfSupportedInterfaceOrientations];
+        [self.navigationController setNeedsUpdateOfSupportedInterfaceOrientations];
+        if (lock != 0) {
+            UIWindowSceneGeometryPreferencesIOS *prefs = [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:lock];
+            [self.view.window.windowScene requestGeometryUpdateWithPreferences:prefs errorHandler:nil];
+        }
+    }
+}
+
+// Lock in the current orientation, or unlock
+- (void)bureauToggleOrientationLock {
+    UIInterfaceOrientationMask lock = 0;
+    if ([self bureauOrientationLock] == 0) {
+        UIInterfaceOrientation current = self.view.window.windowScene.interfaceOrientation;
+        lock = UIInterfaceOrientationIsPortrait(current) ? UIInterfaceOrientationMaskPortrait : UIInterfaceOrientationMaskLandscape;
+    }
+    [[NSUserDefaults standardUserDefaults] setInteger:(NSInteger)lock forKey:BUREAU_ORIENTATION_LOCK_KEY];
+    [self bureauApplyOrientationLock];
+    [self bureauRestartHideTimer];
 }
 
 - (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
@@ -877,6 +914,7 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
         [self bureauButtonWithSymbol:@"command" title:@"Touches" action:@selector(bureauToggleKeys)],
         [self bureauButtonWithSymbol:@"doc.on.clipboard" title:@"Coller depuis l'iPhone" action:@selector(bureauPasteFromPhone)],
         [self bureauButtonWithSymbol:@"arrow.down.right.and.arrow.up.left" title:@"Zoom 100 %" action:@selector(bureauResetZoom)],
+        (_bureauRotationButton = [self bureauButtonWithSymbol:@"lock.rotation.open" title:@"Verrouiller l'orientation" action:@selector(bureauToggleOrientationLock)]),
         _bureauPinButton,
         [self bureauDisconnectButton],
     ];
@@ -954,6 +992,7 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
     [self bureauUpdateHandle];
 
     [self setupBureauComposer];
+    [self bureauApplyOrientationLock];
 }
 
 - (void)setupBureauComposer {

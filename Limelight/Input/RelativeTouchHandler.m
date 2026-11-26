@@ -38,6 +38,7 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
     CGPoint cursorLocation;
     BOOL cursorKnown;
     CGRect cursorArea;                 // video area the cursor position refers to
+    CGPoint screenTouch, screenOriginal; // finger in window coordinates (do not move with the zoomed image)
     CFTimeInterval lastMoveTime;
     CGPoint velocity;                  // points per second, smoothed
     CADisplayLink* flingLink;
@@ -190,6 +191,9 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
     if ([[event allTouches] count] == 1) {
         UITouch *touch = [[event allTouches] anyObject];
         originalLocation = touchLocation = [touch locationInView:view];
+#if !TARGET_OS_TV
+        screenOriginal = screenTouch = [touch locationInView:nil];
+#endif
         if (!isDragging) {
             dragTimer = [NSTimer scheduledTimerWithTimeInterval:0.650
                                                      target:self
@@ -212,10 +216,17 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
         CGPoint currentLocation = [touch locationInView:view];
         
 #if !TARGET_OS_TV
-        if (touchLocation.x != currentLocation.x ||
-            touchLocation.y != currentLocation.y)
+        // Finger movement measured in window coordinates, then divided by the zoom (as
+        // Chrome Remote Desktop: inverse view transform). Measuring it in the stream view's
+        // own coordinates made a feedback loop: re-centering the zoomed image moved the view
+        // under a still finger, which moved the cursor again, which moved the image...
+        CGPoint screenLocation = [touch locationInView:nil];
+        if (screenTouch.x != screenLocation.x ||
+            screenTouch.y != screenLocation.y)
         {
-            CGFloat dx = currentLocation.x - touchLocation.x, dy = currentLocation.y - touchLocation.y;
+            CGFloat zoom = MAX(view.transform.a, 1.0);
+            CGFloat dx = (screenLocation.x - screenTouch.x) / zoom, dy = (screenLocation.y - screenTouch.y) / zoom;
+            screenTouch = screenLocation;
             CFTimeInterval now = CACurrentMediaTime();
             CFTimeInterval dt = MAX(now - lastMoveTime, 0.001);
             // Smoothed velocity (points per second) for the fling
@@ -223,7 +234,7 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
             lastMoveTime = now;
             [self moveCursorByX:dx y:dy];
             touchLocation = currentLocation;
-            if ([self isConfirmedMove:touchLocation from:originalLocation]) {
+            if ([self isConfirmedMove:screenTouch from:screenOriginal]) {
                 touchMoved = true;
             }
         }
@@ -313,6 +324,9 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
         [activeSet unionSet:[event allTouches]];
         [activeSet minusSet:touches];
         touchLocation = [[activeSet anyObject] locationInView:view];
+#if !TARGET_OS_TV
+        screenTouch = [[activeSet anyObject] locationInView:nil];
+#endif
         
         // Mark this touch as moved so we don't send a left mouse click if the user
         // right clicks without moving their other finger.
