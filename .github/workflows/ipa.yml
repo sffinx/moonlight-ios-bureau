@@ -29,7 +29,10 @@ jobs:
           submodules: recursive
 
       - name: Download iOS platform
-        run: xcodebuild -downloadPlatform iOS
+        # Only the simulator runtime is downloaded here; a device (iphoneos) build uses the
+        # SDK bundled with Xcode. It fails at times ("Unable to connect to simulator").
+        run: |
+          xcodebuild -downloadPlatform iOS || echo "::warning::xcodebuild -downloadPlatform iOS a échoué (simulateur seulement), compilation iphoneos poursuivie"
 
       - name: Build Release (iphoneos, non signé)
         run: |
