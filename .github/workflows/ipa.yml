@@ -45,6 +45,8 @@ jobs:
           test -n "$APP"
           mkdir Payload
           cp -R "$APP" Payload/
+          # Numéro de build = numéro de run : SideStore exige qu'il corresponde au buildVersion de la source
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "Payload/$(basename "$APP")/Info.plist"
           zip -qry MoonlightBureau.ipa Payload
           ls -l MoonlightBureau.ipa
           shasum -a 256 MoonlightBureau.ipa
@@ -64,7 +66,7 @@ jobs:
           INFO=$(find Payload -maxdepth 2 -name Info.plist | head -1)
           VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$INFO")
           BUNDLE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$INFO")
-          BUILD="${{ github.run_number }}"
+          BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$INFO")
           SIZE=$(stat -f%z MoonlightBureau.ipa)
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           REPO="${{ github.repository }}"
