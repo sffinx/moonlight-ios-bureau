@@ -1061,8 +1061,7 @@ static const double MOUSE_SPEED_DIVISOR = 1.25;
     // Even if no gamepads are present, we will always count one if OSC is enabled,
     // or it's set to auto and no keyboard or mouse is present. Absolute touch mode
     // disables the OSC.
-    // Moonlight Bureau: no on-screen gamepad on iOS, so no virtual gamepad on the host either
-    if (level != OnScreenControlsLevelOff && (![ControllerSupport hasKeyboardOrMouse] || level != OnScreenControlsLevelAuto) && !settings.absoluteTouchMode && TARGET_OS_TV) {
+    if (level != OnScreenControlsLevelOff && (![ControllerSupport hasKeyboardOrMouse] || level != OnScreenControlsLevelAuto) && !settings.absoluteTouchMode) {
         mask |= 0x1;
     }
     
