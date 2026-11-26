@@ -50,6 +50,17 @@
     
 #if !TARGET_OS_TV
     UIScreenEdgePanGestureRecognizer *_exitSwipeRecognizer;
+
+    // Moonlight Bureau toolbar
+    UIButton *_bureauHandle;
+    UIVisualEffectView *_bureauBar;
+    UIScrollView *_bureauKeysRow;
+    UIButton *_bureauPinButton;
+    UIView *_bureauComposer;
+    UITextView *_bureauTextView;
+    UILabel *_bureauPlaceholder;
+    NSTimer *_bureauHideTimer;
+    BOOL _bureauPinned;
 #endif
 }
 
@@ -224,6 +235,10 @@
     [self.view addSubview:_stageLabel];
     [self.view addSubview:_spinner];
     [self.view addSubview:_tipLabel];
+
+#if !TARGET_OS_TV
+    [self setupBureauToolbar];
+#endif
 }
 
 - (UIView *)viewForZoomingInScrollView:(UIScrollView *)scrollView {
@@ -758,6 +773,413 @@
     // GCMouse is horribly broken on iOS 14.0 for certain mice. Only lock
     // the cursor if there is a GCMouse present.
     return [GCMouse mice].count > 0;
+}
+#endif
+
+#if !TARGET_OS_TV
+#pragma mark - Moonlight Bureau toolbar
+// Translucent toolbar in the spirit of Chrome Remote Desktop: a small handle at the top
+// shows/hides it, it hides itself after a few seconds unless pinned. It gives a text
+// composer above the iOS keyboard (accents, dictation and autocorrect are composed on the
+// phone and sent as Unicode, so the PC keyboard layout and dead keys don't matter), common
+// keys and shortcuts, paste from the iPhone, zoom reset and disconnect.
+
+static const NSTimeInterval BUREAU_AUTOHIDE_SECONDS = 5.0;
+static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN = 0x0D,
+                   BUREAU_VK_ESCAPE = 0x1B, BUREAU_VK_LEFT = 0x25, BUREAU_VK_UP = 0x26,
+                   BUREAU_VK_RIGHT = 0x27, BUREAU_VK_DOWN = 0x28, BUREAU_VK_DELETE = 0x2E,
+                   BUREAU_VK_LWIN = 0x5B, BUREAU_VK_LSHIFT = 0xA0, BUREAU_VK_LCONTROL = 0xA2,
+                   BUREAU_VK_LMENU = 0xA4;
+
+- (UIButton *)bureauButtonWithSymbol:(NSString *)symbol title:(NSString *)title action:(SEL)action {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    if (symbol != nil) {
+        UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightMedium];
+        [button setImage:[UIImage systemImageNamed:symbol withConfiguration:config] forState:UIControlStateNormal];
+    }
+    if (title != nil && symbol == nil) {
+        [button setTitle:title forState:UIControlStateNormal];
+        button.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    }
+    button.accessibilityLabel = title;
+    button.tintColor = UIColor.whiteColor;
+    [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    button.contentEdgeInsets = UIEdgeInsetsMake(0, 10, 0, 10);
+    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    [button.heightAnchor constraintEqualToConstant:40].active = YES;
+    [button.widthAnchor constraintGreaterThanOrEqualToConstant:40].active = YES;
+    return button;
+}
+
+- (void)setupBureauToolbar {
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+
+    // Toolbar: blurred, rounded, top center
+    _bureauBar = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark]];
+    _bureauBar.translatesAutoresizingMaskIntoConstraints = NO;
+    _bureauBar.layer.cornerRadius = 14;
+    _bureauBar.clipsToBounds = YES;
+    _bureauBar.alpha = 0.92;
+    _bureauBar.hidden = YES;
+    [self.view addSubview:_bureauBar];
+
+    _bureauPinButton = [self bureauButtonWithSymbol:@"pin" title:@"Épingler" action:@selector(bureauTogglePin)];
+    NSArray<UIButton *> *mainButtons = @[
+        [self bureauButtonWithSymbol:@"keyboard" title:@"Clavier" action:@selector(bureauShowComposer)],
+        [self bureauButtonWithSymbol:@"command" title:@"Touches" action:@selector(bureauToggleKeys)],
+        [self bureauButtonWithSymbol:@"doc.on.clipboard" title:@"Coller depuis l'iPhone" action:@selector(bureauPasteFromPhone)],
+        [self bureauButtonWithSymbol:@"arrow.down.right.and.arrow.up.left" title:@"Zoom 100 %" action:@selector(bureauResetZoom)],
+        _bureauPinButton,
+        [self bureauButtonWithSymbol:@"xmark.circle" title:@"Déconnecter" action:@selector(bureauDisconnect)],
+    ];
+    UIStackView *mainRow = [[UIStackView alloc] initWithArrangedSubviews:mainButtons];
+    mainRow.axis = UILayoutConstraintAxisHorizontal;
+    mainRow.spacing = 2;
+
+    // Keys and shortcuts row (scrolls horizontally on narrow screens)
+    NSArray *keys = @[
+        @[@"Échap", @(BUREAU_VK_ESCAPE), @0], @[@"Tab", @(BUREAU_VK_TAB), @0], @[@"⊞", @(BUREAU_VK_LWIN), @0],
+        @[@"←", @(BUREAU_VK_LEFT), @0], @[@"↑", @(BUREAU_VK_UP), @0], @[@"↓", @(BUREAU_VK_DOWN), @0], @[@"→", @(BUREAU_VK_RIGHT), @0],
+        @[@"Suppr", @(BUREAU_VK_DELETE), @0],
+        @[@"Copier", @('C'), @(MODIFIER_CTRL)], @[@"Coller", @('V'), @(MODIFIER_CTRL)], @[@"Couper", @('X'), @(MODIFIER_CTRL)],
+        @[@"Annuler", @('Z'), @(MODIFIER_CTRL)], @[@"Tout", @('A'), @(MODIFIER_CTRL)],
+        @[@"Alt+Tab", @(BUREAU_VK_TAB), @(MODIFIER_ALT)], @[@"Bureau", @('D'), @(MODIFIER_META)],
+        @[@"Gestionnaire", @(0x1B), @(MODIFIER_CTRL | MODIFIER_SHIFT)],
+    ];
+    UIStackView *keysStack = [[UIStackView alloc] init];
+    keysStack.axis = UILayoutConstraintAxisHorizontal;
+    keysStack.spacing = 2;
+    keysStack.translatesAutoresizingMaskIntoConstraints = NO;
+    for (NSArray *key in keys) {
+        UIButton *b = [self bureauButtonWithSymbol:nil title:key[0] action:@selector(bureauKeyButton:)];
+        b.tag = ([key[1] intValue] & 0xFF) | ([key[2] intValue] << 8);
+        [keysStack addArrangedSubview:b];
+    }
+    _bureauKeysRow = [[UIScrollView alloc] init];
+    _bureauKeysRow.showsHorizontalScrollIndicator = NO;
+    _bureauKeysRow.hidden = YES;
+    [_bureauKeysRow addSubview:keysStack];
+    [NSLayoutConstraint activateConstraints:@[
+        [keysStack.leadingAnchor constraintEqualToAnchor:_bureauKeysRow.contentLayoutGuide.leadingAnchor],
+        [keysStack.trailingAnchor constraintEqualToAnchor:_bureauKeysRow.contentLayoutGuide.trailingAnchor],
+        [keysStack.topAnchor constraintEqualToAnchor:_bureauKeysRow.contentLayoutGuide.topAnchor],
+        [keysStack.bottomAnchor constraintEqualToAnchor:_bureauKeysRow.contentLayoutGuide.bottomAnchor],
+        [keysStack.heightAnchor constraintEqualToAnchor:_bureauKeysRow.frameLayoutGuide.heightAnchor],
+        [_bureauKeysRow.heightAnchor constraintEqualToConstant:40],
+    ]];
+
+    UIStackView *rows = [[UIStackView alloc] initWithArrangedSubviews:@[mainRow, _bureauKeysRow]];
+    rows.axis = UILayoutConstraintAxisVertical;
+    rows.alignment = UIStackViewAlignmentCenter;
+    rows.spacing = 4;
+    rows.translatesAutoresizingMaskIntoConstraints = NO;
+    [_bureauBar.contentView addSubview:rows];
+    [NSLayoutConstraint activateConstraints:@[
+        [rows.topAnchor constraintEqualToAnchor:_bureauBar.contentView.topAnchor constant:4],
+        [rows.bottomAnchor constraintEqualToAnchor:_bureauBar.contentView.bottomAnchor constant:-4],
+        [rows.leadingAnchor constraintEqualToAnchor:_bureauBar.contentView.leadingAnchor constant:6],
+        [rows.trailingAnchor constraintEqualToAnchor:_bureauBar.contentView.trailingAnchor constant:-6],
+        [_bureauKeysRow.widthAnchor constraintEqualToAnchor:rows.widthAnchor],
+        [_bureauBar.topAnchor constraintEqualToAnchor:safe.topAnchor constant:6],
+        [_bureauBar.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
+        [_bureauBar.widthAnchor constraintLessThanOrEqualToAnchor:safe.widthAnchor constant:-16],
+    ]];
+
+    // Handle: always visible, small and translucent, shows/hides the toolbar
+    _bureauHandle = [UIButton buttonWithType:UIButtonTypeSystem];
+    _bureauHandle.translatesAutoresizingMaskIntoConstraints = NO;
+    _bureauHandle.backgroundColor = [UIColor colorWithWhite:0 alpha:0.35];
+    _bureauHandle.tintColor = [UIColor colorWithWhite:1 alpha:0.85];
+    _bureauHandle.layer.cornerRadius = 12;
+    _bureauHandle.accessibilityLabel = @"Barre d'outils";
+    [_bureauHandle addTarget:self action:@selector(bureauToggleToolbar) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:_bureauHandle];
+    [NSLayoutConstraint activateConstraints:@[
+        [_bureauHandle.widthAnchor constraintEqualToConstant:48],
+        [_bureauHandle.heightAnchor constraintEqualToConstant:24],
+        [_bureauHandle.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
+    ]];
+    // Two positions: under the toolbar when it is shown, at the top otherwise
+    NSLayoutConstraint *handleTop = [_bureauHandle.topAnchor constraintEqualToAnchor:safe.topAnchor constant:2];
+    handleTop.priority = UILayoutPriorityDefaultHigh;
+    handleTop.active = YES;
+    [self bureauUpdateHandle];
+
+    [self setupBureauComposer];
+}
+
+- (void)setupBureauComposer {
+    // Composer pinned on top of the iOS keyboard (keyboardLayoutGuide, iOS 15+)
+    _bureauComposer = [[UIView alloc] init];
+    _bureauComposer.translatesAutoresizingMaskIntoConstraints = NO;
+    _bureauComposer.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.96];
+    _bureauComposer.hidden = YES;
+    [self.view addSubview:_bureauComposer];
+
+    UIButton *hideKeyboard = [self bureauButtonWithSymbol:@"keyboard.chevron.compact.down" title:@"Fermer le clavier" action:@selector(bureauHideComposer)];
+    UIButton *backspace = [self bureauButtonWithSymbol:@"delete.left" title:@"Retour arrière sur le PC" action:@selector(bureauSendBackspace)];
+    UIButton *enter = [self bureauButtonWithSymbol:@"return" title:@"Envoyer puis Entrée" action:@selector(bureauSendWithEnter)];
+    UIButton *send = [self bureauButtonWithSymbol:@"paperplane.fill" title:@"Envoyer" action:@selector(bureauSendText)];
+
+    _bureauTextView = [[UITextView alloc] init];
+    _bureauTextView.backgroundColor = UIColor.clearColor;
+    _bureauTextView.textColor = UIColor.whiteColor;
+    _bureauTextView.tintColor = UIColor.whiteColor;
+    _bureauTextView.font = [UIFont systemFontOfSize:17];
+    _bureauTextView.keyboardAppearance = UIKeyboardAppearanceDark;
+    _bureauTextView.scrollEnabled = YES;
+    _bureauTextView.textContainerInset = UIEdgeInsetsMake(8, 0, 8, 0);
+    _bureauTextView.delegate = (id<UITextViewDelegate>)self;
+    _bureauPlaceholder = [[UILabel alloc] init];
+    _bureauPlaceholder.text = @"Envoyer du texte (Retour = nouvelle ligne)";
+    _bureauPlaceholder.textColor = [UIColor colorWithWhite:1 alpha:0.4];
+    _bureauPlaceholder.font = [UIFont systemFontOfSize:17];
+    _bureauPlaceholder.translatesAutoresizingMaskIntoConstraints = NO;
+    [_bureauTextView addSubview:_bureauPlaceholder];
+
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[hideKeyboard, _bureauTextView, backspace, enter, send]];
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.alignment = UIStackViewAlignmentCenter;
+    row.spacing = 4;
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    [_bureauComposer addSubview:row];
+
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [_bureauComposer.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [_bureauComposer.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [_bureauComposer.bottomAnchor constraintEqualToAnchor:self.view.keyboardLayoutGuide.topAnchor],
+        [row.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:4],
+        [row.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-4],
+        [row.topAnchor constraintEqualToAnchor:_bureauComposer.topAnchor constant:4],
+        [row.bottomAnchor constraintEqualToAnchor:_bureauComposer.bottomAnchor constant:-4],
+        [_bureauTextView.heightAnchor constraintGreaterThanOrEqualToConstant:40],
+        [_bureauTextView.heightAnchor constraintLessThanOrEqualToConstant:96],
+        [_bureauPlaceholder.leadingAnchor constraintEqualToAnchor:_bureauTextView.leadingAnchor constant:5],
+        [_bureauPlaceholder.topAnchor constraintEqualToAnchor:_bureauTextView.topAnchor constant:8],
+    ]];
+    [_bureauTextView setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+}
+
+#pragma mark Toolbar visibility
+
+- (void)bureauUpdateHandle {
+    BOOL shown = !_bureauBar.hidden;
+    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightBold];
+    [_bureauHandle setImage:[UIImage systemImageNamed:(shown ? @"chevron.up" : @"chevron.down") withConfiguration:config]
+                   forState:UIControlStateNormal];
+    // Hidden toolbar: handle stays at the top. Shown: handle sits right under the toolbar.
+    for (NSLayoutConstraint *c in self.view.constraints) {
+        if (c.firstItem == _bureauHandle && c.firstAttribute == NSLayoutAttributeTop && c.secondItem == _bureauBar) {
+            c.active = NO;
+        }
+    }
+    if (shown) {
+        [_bureauHandle.topAnchor constraintEqualToAnchor:_bureauBar.bottomAnchor constant:2].active = YES;
+    }
+    [self.view bringSubviewToFront:_bureauBar];
+    [self.view bringSubviewToFront:_bureauHandle];
+    [self.view bringSubviewToFront:_bureauComposer];
+}
+
+- (void)bureauToggleToolbar {
+    [self bureauSetToolbarShown:_bureauBar.hidden];
+}
+
+- (void)bureauSetToolbarShown:(BOOL)shown {
+    _bureauBar.hidden = !shown;
+    if (!shown) {
+        _bureauKeysRow.hidden = YES;
+    }
+    [UIView animateWithDuration:0.15 animations:^{
+        [self bureauUpdateHandle];
+        [self.view layoutIfNeeded];
+    }];
+    [self bureauRestartHideTimer];
+}
+
+- (void)bureauRestartHideTimer {
+    [_bureauHideTimer invalidate];
+    _bureauHideTimer = nil;
+    if (!_bureauBar.hidden && !_bureauPinned) {
+        _bureauHideTimer = [NSTimer scheduledTimerWithTimeInterval:BUREAU_AUTOHIDE_SECONDS
+                                                            target:self
+                                                          selector:@selector(bureauAutoHide)
+                                                          userInfo:nil
+                                                           repeats:NO];
+    }
+}
+
+- (void)bureauAutoHide {
+    if (!_bureauPinned) {
+        [self bureauSetToolbarShown:NO];
+    }
+}
+
+- (void)bureauTogglePin {
+    _bureauPinned = !_bureauPinned;
+    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightMedium];
+    [_bureauPinButton setImage:[UIImage systemImageNamed:(_bureauPinned ? @"pin.fill" : @"pin") withConfiguration:config]
+                      forState:UIControlStateNormal];
+    [self bureauRestartHideTimer];
+}
+
+- (void)bureauToggleKeys {
+    _bureauKeysRow.hidden = !_bureauKeysRow.hidden;
+    [UIView animateWithDuration:0.15 animations:^{
+        [self.view layoutIfNeeded];
+    }];
+    [self bureauRestartHideTimer];
+}
+
+#pragma mark Actions
+
+- (void)bureauResetZoom {
+    [_scrollView setZoomScale:1.0 animated:YES];
+    [self bureauRestartHideTimer];
+}
+
+- (void)bureauDisconnect {
+    [self returnToMainFrame];
+}
+
+- (void)bureauKeyButton:(UIButton *)sender {
+    short vk = sender.tag & 0xFF;
+    char modifiers = (char)((sender.tag >> 8) & 0xFF);
+    [self bureauSendKey:vk modifiers:modifiers];
+    [self bureauRestartHideTimer];
+}
+
+- (void)bureauPasteFromPhone {
+    NSString *text = UIPasteboard.generalPasteboard.string;
+    if (text.length > 0) {
+        [self bureauSendTextToPC:text];
+    }
+    [self bureauRestartHideTimer];
+}
+
+#pragma mark Composer
+
+- (void)bureauShowComposer {
+    [self bureauSetToolbarShown:NO];
+    _bureauComposer.hidden = NO;
+    [self.view bringSubviewToFront:_bureauComposer];
+    [_bureauTextView becomeFirstResponder];
+}
+
+- (void)bureauHideComposer {
+    [_bureauTextView resignFirstResponder];
+    _bureauComposer.hidden = YES;
+}
+
+// Keyboard closed by any means (swipe, other app...): hide the composer too
+- (void)textViewDidEndEditing:(UITextView *)textView {
+    if (textView == _bureauTextView) {
+        _bureauComposer.hidden = YES;
+    }
+}
+
+- (void)textViewDidChange:(UITextView *)textView {
+    if (textView == _bureauTextView) {
+        _bureauPlaceholder.hidden = textView.text.length > 0;
+    }
+}
+
+- (void)bureauTakeComposedText:(void (^)(NSString *text))handler {
+    NSString *text = _bureauTextView.text ?: @"";
+    _bureauTextView.text = @"";
+    _bureauPlaceholder.hidden = NO;
+    handler(text);
+}
+
+- (void)bureauSendText {
+    [self bureauTakeComposedText:^(NSString *text) {
+        if (text.length > 0) {
+            [self bureauSendTextToPC:text];
+        }
+    }];
+}
+
+- (void)bureauSendWithEnter {
+    [self bureauTakeComposedText:^(NSString *text) {
+        if (text.length > 0) {
+            [self bureauSendTextToPC:text];
+        }
+        [self bureauSendKey:BUREAU_VK_RETURN modifiers:0];
+    }];
+}
+
+- (void)bureauSendBackspace {
+    [self bureauSendKey:BUREAU_VK_BACK modifiers:0];
+}
+
+#pragma mark Sending to the PC
+
+// Text is sent as Unicode. A line break becomes Shift+Enter: a new line in editors and
+// chat apps, not a "send" or "validate". Each event carries at most 32 UTF-8 bytes
+// (UTF8_TEXT_EVENT_MAX_COUNT), so chunks never split a character.
+- (void)bureauSendTextToPC:(NSString *)text {
+    NSString *normalized = [[text stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"]
+                            stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
+    NSArray<NSString *> *lines = [normalized componentsSeparatedByString:@"\n"];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        for (NSUInteger i = 0; i < lines.count; i++) {
+            if (i > 0) {
+                [self bureauKeyPressSync:BUREAU_VK_RETURN modifiers:MODIFIER_SHIFT];
+            }
+            NSString *line = lines[i];
+            NSMutableString *chunk = [NSMutableString string];
+            NSUInteger chunkBytes = 0;
+            NSUInteger index = 0;
+            while (index < line.length) {
+                NSRange range = [line rangeOfComposedCharacterSequenceAtIndex:index];
+                NSString *character = [line substringWithRange:range];
+                NSUInteger bytes = [character lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+                if (chunkBytes + bytes > 32 && chunk.length > 0) {
+                    LiSendUtf8TextEvent(chunk.UTF8String, (unsigned int)chunkBytes);
+                    [chunk setString:@""];
+                    chunkBytes = 0;
+                }
+                if (bytes <= 32) {
+                    [chunk appendString:character];
+                    chunkBytes += bytes;
+                }
+                index = NSMaxRange(range);
+            }
+            if (chunkBytes > 0) {
+                LiSendUtf8TextEvent(chunk.UTF8String, (unsigned int)chunkBytes);
+            }
+            usleep(10 * 1000);
+        }
+    });
+}
+
+- (void)bureauSendKey:(short)vk modifiers:(char)modifiers {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        [self bureauKeyPressSync:vk modifiers:modifiers];
+    });
+}
+
+// Presses the modifiers, then the key, then releases everything (background thread only)
+- (void)bureauKeyPressSync:(short)vk modifiers:(char)modifiers {
+    short modifierKeys[4] = { BUREAU_VK_LCONTROL, BUREAU_VK_LSHIFT, BUREAU_VK_LMENU, BUREAU_VK_LWIN };
+    char modifierFlags[4] = { MODIFIER_CTRL, MODIFIER_SHIFT, MODIFIER_ALT, MODIFIER_META };
+    char held = 0;
+    for (int i = 0; i < 4; i++) {
+        if (modifiers & modifierFlags[i]) {
+            held |= modifierFlags[i];
+            LiSendKeyboardEvent(0x8000 | modifierKeys[i], KEY_ACTION_DOWN, held);
+        }
+    }
+    LiSendKeyboardEvent(0x8000 | vk, KEY_ACTION_DOWN, modifiers);
+    usleep(30 * 1000);
+    LiSendKeyboardEvent(0x8000 | vk, KEY_ACTION_UP, modifiers);
+    for (int i = 3; i >= 0; i--) {
+        if (modifiers & modifierFlags[i]) {
+            held &= ~modifierFlags[i];
+            LiSendKeyboardEvent(0x8000 | modifierKeys[i], KEY_ACTION_UP, held);
+        }
+    }
 }
 #endif
 
