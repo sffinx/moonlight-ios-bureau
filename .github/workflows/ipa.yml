@@ -18,6 +18,8 @@ jobs:
   ipa:
     name: IPA iOS
     runs-on: macos-latest
+    permissions:
+      contents: write
     timeout-minutes: 40
 
     steps:
@@ -53,3 +55,59 @@ jobs:
           name: MoonlightBureau-ipa
           path: MoonlightBureau.ipa
           retention-days: 30
+
+      - name: Publish release "latest" + SideStore source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          INFO=$(find Payload -maxdepth 2 -name Info.plist | head -1)
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$INFO")
+          BUNDLE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$INFO")
+          BUILD="${{ github.run_number }}"
+          SIZE=$(stat -f%z MoonlightBureau.ipa)
+          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          REPO="${{ github.repository }}"
+          SHA=$(shasum -a 256 MoonlightBureau.ipa | cut -d' ' -f1)
+          python3 - "$VERSION" "$BUILD" "$BUNDLE" "$SIZE" "$DATE" "$REPO" "$SHA" <<'PY'
+          import json, sys
+          version, build, bundle, size, date, repo, sha = sys.argv[1:]
+          url = f"https://github.com/{repo}/releases/download/latest/MoonlightBureau.ipa"
+          icon = f"https://raw.githubusercontent.com/{repo}/bureau/Limelight/Images.xcassets/AppIcon.appiconset/1024x%20icon.png"
+          desc = ("Moonlight iOS, mode bureau : zoom en pinçant en mode Touchpad, vue qui suit le curseur, "
+                  "barre d'outils (texte Unicode, raccourcis, collage depuis l'iPhone).")
+          source = {
+              "name": "Moonlight Bureau",
+              "identifier": "io.github.sffinx.moonlight-ios-bureau",
+              "sourceURL": f"https://github.com/{repo}/releases/download/latest/source.json",
+              "apps": [{
+                  "name": "Moonlight Bureau",
+                  "bundleIdentifier": bundle,
+                  "developerName": "sffinx (fork de Moonlight Game Streaming Project)",
+                  "subtitle": "Moonlight en mode bureau",
+                  "localizedDescription": desc,
+                  "iconURL": icon,
+                  "tintColor": "#3b82f6",
+                  "category": "utilities",
+                  "versions": [{
+                      "version": version,
+                      "buildVersion": build,
+                      "date": date,
+                      "localizedDescription": f"Build {build} ({sha[:12]})",
+                      "downloadURL": url,
+                      "size": int(size),
+                      "sha256": sha,
+                      "minOSVersion": "15.0",
+                  }],
+              }],
+              "news": [],
+          }
+          json.dump(source, open("source.json", "w"), ensure_ascii=False, indent=2)
+          PY
+          NOTES="IPA non signée (sideload). Build ${BUILD}, version ${VERSION}, SHA-256 ${SHA}. Source SideStore : https://github.com/${REPO}/releases/download/latest/source.json"
+          if gh release view latest -R "$REPO" > /dev/null 2>&1; then
+            gh release edit latest -R "$REPO" --title "Moonlight Bureau (dernière build)" --notes "$NOTES"
+          else
+            gh release create latest -R "$REPO" --title "Moonlight Bureau (dernière build)" --notes "$NOTES" --target "${{ github.sha }}"
+          fi
+          gh release upload latest MoonlightBureau.ipa source.json -R "$REPO" --clobber
