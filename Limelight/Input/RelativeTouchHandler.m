@@ -22,12 +22,27 @@ static const int REFERENCE_HEIGHT = 720;
 static const CGFloat CURSOR_GAIN_MIN = 1.0;
 static const CGFloat CURSOR_GAIN_MAX = 2.5;
 static const CGFloat CURSOR_ACCEL_POINTS = 12.0;
+
+// Fling (inertia) after lifting the finger, constants and formula of Chrome Remote Desktop
+// (Chromium remoting/client/gesture_interpreter.cc and ui/fling_tracker.cc):
+// displacement x(t) = T * v0 * (1 - e^(-t/T)), stops when the speed falls under 0.01 px/ms,
+// no fling if the total displacement would be under 20 px.
+static const CGFloat FLING_TIME_CONSTANT_MS = 180.0;
+static const CGFloat FLING_MIN_SPEED = 0.01;        // points per ms
+static const CGFloat FLING_MIN_DISPLACEMENT = 20.0; // points
+static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be moving when lifted
 #endif
 
 @implementation RelativeTouchHandler {
 #if !TARGET_OS_TV
     CGPoint cursorLocation;
     BOOL cursorKnown;
+    CFTimeInterval lastMoveTime;
+    CGPoint velocity;                  // points per second, smoothed
+    CADisplayLink* flingLink;
+    CFTimeInterval flingStart;
+    CGFloat flingSpeed, flingDuration, flingDirX, flingDirY;
+    CGPoint flingPrevious;
 #endif
     CGPoint touchLocation, originalLocation;
     BOOL touchMoved;
@@ -62,7 +77,49 @@ static const CGFloat CURSOR_ACCEL_POINTS = 12.0;
 }
 
 #if !TARGET_OS_TV
+- (void)stopFling {
+    [flingLink invalidate];
+    flingLink = nil;
+}
+
+- (void)startFlingWithVelocity:(CGPoint)v {
+    [self stopFling];
+    CGFloat speed = hypot(v.x, v.y) / 1000.0; // points per ms
+    if (speed < FLING_MIN_SPEED) {
+        return;
+    }
+    CGFloat duration = -FLING_TIME_CONSTANT_MS * log(FLING_MIN_SPEED / speed);
+    CGFloat finalDisplacement = FLING_TIME_CONSTANT_MS * speed * -expm1(-duration / FLING_TIME_CONSTANT_MS);
+    if (finalDisplacement < FLING_MIN_DISPLACEMENT) {
+        return;
+    }
+    flingSpeed = speed;
+    flingDuration = duration;
+    flingDirX = v.x / 1000.0 / speed;
+    flingDirY = v.y / 1000.0 / speed;
+    flingPrevious = CGPointZero;
+    flingStart = CACurrentMediaTime();
+    flingLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(flingTick:)];
+    [flingLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+}
+
+- (void)flingTick:(CADisplayLink*)link {
+    CGFloat elapsed = (CACurrentMediaTime() - flingStart) * 1000.0;
+    if (elapsed > flingDuration) {
+        [self stopFling];
+        return;
+    }
+    CGFloat displacement = FLING_TIME_CONSTANT_MS * flingSpeed * -expm1(-elapsed / FLING_TIME_CONSTANT_MS);
+    CGPoint position = CGPointMake(displacement * flingDirX, displacement * flingDirY);
+    [self moveCursorByX:position.x - flingPrevious.x y:position.y - flingPrevious.y accelerate:NO];
+    flingPrevious = position;
+}
+
 - (void)moveCursorByX:(CGFloat)dx y:(CGFloat)dy {
+    [self moveCursorByX:dx y:dy accelerate:YES];
+}
+
+- (void)moveCursorByX:(CGFloat)dx y:(CGFloat)dy accelerate:(BOOL)accelerate {
     CGSize videoSize = [view getVideoAreaSize];
     if (videoSize.width < 1 || videoSize.height < 1) {
         return;
@@ -76,8 +133,14 @@ static const CGFloat CURSOR_ACCEL_POINTS = 12.0;
         cursorKnown = YES;
     }
 
-    CGFloat speed = MIN(hypot(dx, dy) / CURSOR_ACCEL_POINTS, 1.0);
-    CGFloat gain = CURSOR_GAIN_MIN + (CURSOR_GAIN_MAX - CURSOR_GAIN_MIN) * speed;
+    // Zoomed in: exactly 1:1 with the finger on screen, no acceleration (as Chrome Remote
+    // Desktop: translation mapped through the inverse view transform). Not zoomed: acceleration.
+    CGFloat gain = 1.0;
+    BOOL zoomed = view.transform.a > 1.01;
+    if (!zoomed && accelerate) {
+        CGFloat speed = MIN(hypot(dx, dy) / CURSOR_ACCEL_POINTS, 1.0);
+        gain = CURSOR_GAIN_MIN + (CURSOR_GAIN_MAX - CURSOR_GAIN_MIN) * speed;
+    }
     cursorLocation.x = MIN(MAX(cursorLocation.x + dx * gain, origin.x), origin.x + videoSize.width - 0.5);
     cursorLocation.y = MIN(MAX(cursorLocation.y + dy * gain, origin.y), origin.y + videoSize.height - 0.5);
 
@@ -107,6 +170,11 @@ static const CGFloat CURSOR_ACCEL_POINTS = 12.0;
 }
 
 - (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event {
+#if !TARGET_OS_TV
+    [self stopFling];
+    velocity = CGPointZero;
+    lastMoveTime = CACurrentMediaTime();
+#endif
     touchMoved = false;
     peakTouchCount = [[event allTouches] count];
     if ([[event allTouches] count] == 1) {
@@ -137,7 +205,13 @@ static const CGFloat CURSOR_ACCEL_POINTS = 12.0;
         if (touchLocation.x != currentLocation.x ||
             touchLocation.y != currentLocation.y)
         {
-            [self moveCursorByX:currentLocation.x - touchLocation.x y:currentLocation.y - touchLocation.y];
+            CGFloat dx = currentLocation.x - touchLocation.x, dy = currentLocation.y - touchLocation.y;
+            CFTimeInterval now = CACurrentMediaTime();
+            CFTimeInterval dt = MAX(now - lastMoveTime, 0.001);
+            // Smoothed velocity (points per second) for the fling
+            velocity = CGPointMake(0.6 * dx / dt + 0.4 * velocity.x, 0.6 * dy / dt + 0.4 * velocity.y);
+            lastMoveTime = now;
+            [self moveCursorByX:dx y:dy];
             touchLocation = currentLocation;
             if ([self isConfirmedMove:touchLocation from:originalLocation]) {
                 touchMoved = true;
@@ -184,6 +258,12 @@ static const CGFloat CURSOR_ACCEL_POINTS = 12.0;
 - (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event {
     [dragTimer invalidate];
     dragTimer = nil;
+#if !TARGET_OS_TV
+    if (!isDragging && touchMoved && peakTouchCount == 1 && [[event allTouches] count] == [touches count] &&
+        CACurrentMediaTime() - lastMoveTime < FLING_MAX_IDLE) {
+        [self startFlingWithVelocity:velocity];
+    }
+#endif
     if (isDragging) {
         isDragging = false;
         LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
