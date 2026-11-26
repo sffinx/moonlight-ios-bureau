@@ -252,65 +252,47 @@
 }
 
 #if !TARGET_OS_TV
-// Moonlight Bureau: in trackpad mode, pinch-zoom around the mouse cursor (not the pinch center):
-// the cursor keeps the same place on screen while the scale changes.
-- (void)scrollViewWillBeginZooming:(UIScrollView *)scrollView withView:(UIView *)view {
-    _bureauZoomAnchored = NO;
-    if (scrollView == _scrollView && !_settings.absoluteTouchMode && _bureauCursorKnown) {
-        CGPoint p = [_streamView convertPoint:_bureauCursor toView:_scrollView];
-        _bureauZoomAnchor = CGPointMake(p.x - _scrollView.contentOffset.x, p.y - _scrollView.contentOffset.y);
-        _bureauZoomAnchored = YES;
-    }
-}
-
-- (void)scrollViewDidZoom:(UIScrollView *)scrollView {
-    if (scrollView != _scrollView || !_bureauZoomAnchored) {
+// Moonlight Bureau: viewport behaviour of Chrome Remote Desktop's trackpad mode
+// (Chromium remoting/client/input/trackpad_input_strategy.cc, ui/desktop_viewport.cc):
+// - the view is kept centered on the cursor, so the image moves under a still cursor;
+// - the center is clamped to the desktop: at an edge the image stops and the cursor
+//   moves on to the edge;
+// - pinch-zoom uses the cursor as pivot, then re-centers on it.
+// Finger movement is already divided by the zoom (StreamView points), as in CRD.
+- (void)bureauCenterOnCursor {
+    if (_scrollView == nil || !_bureauCursorKnown || _scrollView.zoomScale <= 1.01f) {
         return;
     }
     CGPoint p = [_streamView convertPoint:_bureauCursor toView:_scrollView];
     CGSize visible = _scrollView.bounds.size;
-    CGFloat x = MIN(MAX(p.x - _bureauZoomAnchor.x, 0), MAX(_scrollView.contentSize.width - visible.width, 0));
-    CGFloat y = MIN(MAX(p.y - _bureauZoomAnchor.y, 0), MAX(_scrollView.contentSize.height - visible.height, 0));
-    _scrollView.contentOffset = CGPointMake(x, y);
+    CGFloat x = MIN(MAX(p.x - visible.width / 2, 0), MAX(_scrollView.contentSize.width - visible.width, 0));
+    CGFloat y = MIN(MAX(p.y - visible.height / 2, 0), MAX(_scrollView.contentSize.height - visible.height, 0));
+    if (x != _scrollView.contentOffset.x || y != _scrollView.contentOffset.y) {
+        [_scrollView setContentOffset:CGPointMake(x, y) animated:NO];
+    }
+}
+
+- (void)scrollViewWillBeginZooming:(UIScrollView *)scrollView withView:(UIView *)view {
+    _bureauZoomAnchored = (scrollView == _scrollView && !_settings.absoluteTouchMode && _bureauCursorKnown);
+}
+
+- (void)scrollViewDidZoom:(UIScrollView *)scrollView {
+    if (scrollView == _scrollView && _bureauZoomAnchored) {
+        [self bureauCenterOnCursor];
+    }
 }
 
 - (void)scrollViewDidEndZooming:(UIScrollView *)scrollView withView:(UIView *)view atScale:(CGFloat)scale {
+    if (_bureauZoomAnchored) {
+        [self bureauCenterOnCursor];
+    }
     _bureauZoomAnchored = NO;
 }
 
-// Moonlight Bureau: keep the trackpad cursor visible while zoomed, like Chrome Remote Desktop.
-// The view only moves when the cursor gets within 20% of an edge.
 - (void)trackpadCursorMoved:(NSNotification *)notification {
-    CGPoint cursor = [[notification.userInfo objectForKey:@"point"] CGPointValue];
-    _bureauCursor = cursor;
+    _bureauCursor = [[notification.userInfo objectForKey:@"point"] CGPointValue];
     _bureauCursorKnown = YES;
-    if (_scrollView == nil || _scrollView.zoomScale <= 1.01f) {
-        return;
-    }
-
-    CGPoint p = [_streamView convertPoint:cursor toView:_scrollView];
-    CGSize visible = _scrollView.bounds.size;
-    CGPoint offset = _scrollView.contentOffset;
-    CGFloat marginX = visible.width * 0.2f;
-    CGFloat marginY = visible.height * 0.2f;
-    CGFloat x = offset.x, y = offset.y;
-
-    if (p.x < offset.x + marginX) {
-        x = p.x - marginX;
-    } else if (p.x > offset.x + visible.width - marginX) {
-        x = p.x - visible.width + marginX;
-    }
-    if (p.y < offset.y + marginY) {
-        y = p.y - marginY;
-    } else if (p.y > offset.y + visible.height - marginY) {
-        y = p.y - visible.height + marginY;
-    }
-
-    x = MIN(MAX(x, 0), MAX(_scrollView.contentSize.width - visible.width, 0));
-    y = MIN(MAX(y, 0), MAX(_scrollView.contentSize.height - visible.height, 0));
-    if (x != offset.x || y != offset.y) {
-        [_scrollView setContentOffset:CGPointMake(x, y) animated:NO];
-    }
+    [self bureauCenterOnCursor];
 }
 #endif
 
