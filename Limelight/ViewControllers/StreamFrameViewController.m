@@ -61,6 +61,10 @@
     UILabel *_bureauPlaceholder;
     NSTimer *_bureauHideTimer;
     BOOL _bureauPinned;
+    CGPoint _bureauCursor;
+    BOOL _bureauCursorKnown;
+    CGPoint _bureauZoomAnchor;
+    BOOL _bureauZoomAnchored;
 #endif
 }
 
@@ -246,14 +250,42 @@
 }
 
 #if !TARGET_OS_TV
+// Moonlight Bureau: in trackpad mode, pinch-zoom around the mouse cursor (not the pinch center):
+// the cursor keeps the same place on screen while the scale changes.
+- (void)scrollViewWillBeginZooming:(UIScrollView *)scrollView withView:(UIView *)view {
+    _bureauZoomAnchored = NO;
+    if (scrollView == _scrollView && !_settings.absoluteTouchMode && _bureauCursorKnown) {
+        CGPoint p = [_streamView convertPoint:_bureauCursor toView:_scrollView];
+        _bureauZoomAnchor = CGPointMake(p.x - _scrollView.contentOffset.x, p.y - _scrollView.contentOffset.y);
+        _bureauZoomAnchored = YES;
+    }
+}
+
+- (void)scrollViewDidZoom:(UIScrollView *)scrollView {
+    if (scrollView != _scrollView || !_bureauZoomAnchored) {
+        return;
+    }
+    CGPoint p = [_streamView convertPoint:_bureauCursor toView:_scrollView];
+    CGSize visible = _scrollView.bounds.size;
+    CGFloat x = MIN(MAX(p.x - _bureauZoomAnchor.x, 0), MAX(_scrollView.contentSize.width - visible.width, 0));
+    CGFloat y = MIN(MAX(p.y - _bureauZoomAnchor.y, 0), MAX(_scrollView.contentSize.height - visible.height, 0));
+    _scrollView.contentOffset = CGPointMake(x, y);
+}
+
+- (void)scrollViewDidEndZooming:(UIScrollView *)scrollView withView:(UIView *)view atScale:(CGFloat)scale {
+    _bureauZoomAnchored = NO;
+}
+
 // Moonlight Bureau: keep the trackpad cursor visible while zoomed, like Chrome Remote Desktop.
 // The view only moves when the cursor gets within 20% of an edge.
 - (void)trackpadCursorMoved:(NSNotification *)notification {
+    CGPoint cursor = [[notification.userInfo objectForKey:@"point"] CGPointValue];
+    _bureauCursor = cursor;
+    _bureauCursorKnown = YES;
     if (_scrollView == nil || _scrollView.zoomScale <= 1.01f) {
         return;
     }
 
-    CGPoint cursor = [[notification.userInfo objectForKey:@"point"] CGPointValue];
     CGPoint p = [_streamView convertPoint:cursor toView:_scrollView];
     CGSize visible = _scrollView.bounds.size;
     CGPoint offset = _scrollView.contentOffset;
@@ -830,7 +862,7 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
         [self bureauButtonWithSymbol:@"doc.on.clipboard" title:@"Coller depuis l'iPhone" action:@selector(bureauPasteFromPhone)],
         [self bureauButtonWithSymbol:@"arrow.down.right.and.arrow.up.left" title:@"Zoom 100 %" action:@selector(bureauResetZoom)],
         _bureauPinButton,
-        [self bureauButtonWithSymbol:@"xmark.circle" title:@"Déconnecter" action:@selector(bureauDisconnect)],
+        [self bureauDisconnectButton],
     ];
     UIStackView *mainRow = [[UIStackView alloc] initWithArrangedSubviews:mainButtons];
     mainRow.axis = UILayoutConstraintAxisHorizontal;
@@ -1039,8 +1071,25 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
     [self bureauRestartHideTimer];
 }
 
+- (UIButton *)bureauDisconnectButton {
+    UIButton *button = [self bureauButtonWithSymbol:@"xmark.circle.fill" title:@"Déconnecter" action:@selector(bureauDisconnect)];
+    button.tintColor = UIColor.systemRedColor;
+    return button;
+}
+
+// Confirmation against mis-taps
 - (void)bureauDisconnect {
-    [self returnToMainFrame];
+    [_bureauHideTimer invalidate];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Se déconnecter ?"
+                                                                    message:@"La session sur le PC reste ouverte."
+                                                             preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Annuler" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
+        [self bureauRestartHideTimer];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Déconnecter" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        [self returnToMainFrame];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)bureauKeyButton:(UIButton *)sender {

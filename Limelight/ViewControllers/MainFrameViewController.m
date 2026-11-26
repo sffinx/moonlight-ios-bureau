@@ -119,12 +119,19 @@ static NSMutableSet* hostList;
 - (void)disableUpButton {
 #if !TARGET_OS_TV
     [self->_upButton setTitle:nil];
+    // Moonlight Bureau: an untitled bar button still draws an empty glass capsule on iOS 26+
+    if (@available(iOS 16.0, *)) {
+        self->_upButton.hidden = YES;
+    }
 #endif
 }
 
 - (void)enableUpButton {
 #if !TARGET_OS_TV
     [self->_upButton setTitle:@"Select New Host"];
+    if (@available(iOS 16.0, *)) {
+        self->_upButton.hidden = NO;
+    }
 #endif
 }
 

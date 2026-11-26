@@ -392,6 +392,10 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 
 - (UIBarButtonItem *)createButtonWithImageNamed:(NSString *)imageName backgroundColor:(UIColor *)backgroundColor target:(id)target action:(SEL)action keyCode:(NSInteger)keyCode isToggleable:(BOOL)isToggleable {
     UIImage *image = [UIImage imageNamed:imageName];
+    // Moonlight Bureau: the close (X) key in red
+    if (keyCode == 0) {
+        image = [image imageWithTintColor:UIColor.systemRedColor renderingMode:UIImageRenderingModeAlwaysOriginal];
+    }
     UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
     [button setImage:image forState:UIControlStateNormal];
     button.frame = CGRectMake(0, 0, 30, 30);
@@ -404,6 +408,10 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     objc_setAssociatedObject(button, "isToggleable", @(isToggleable), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(button, "isOn", @(NO), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     UIBarButtonItem *barButton = [[UIBarButtonItem alloc] initWithCustomView:button];
+    // Moonlight Bureau: on iOS 26+ each item gets a glass capsule that misaligns the key icons
+    if (@available(iOS 26.0, *)) {
+        barButton.hidesSharedBackground = YES;
+    }
     return barButton;
 }
 
