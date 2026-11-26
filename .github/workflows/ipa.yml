@@ -1,0 +1,55 @@
+name: IPA Moonlight Bureau
+
+# Compile une IPA non signée pour iPhone (à signer ensuite par sideload : SideStore, AltStore, Sideloadly…).
+on:
+  push:
+    branches:
+      - bureau
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ipa:
+    name: IPA iOS
+    runs-on: macos-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Download iOS platform
+        run: xcodebuild -downloadPlatform iOS
+
+      - name: Build Release (iphoneos, non signé)
+        run: |
+          set -o pipefail
+          xcodebuild -project Moonlight.xcodeproj -scheme Moonlight -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" \
+            build | tail -200
+
+      - name: Package IPA
+        run: |
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)
+          test -n "$APP"
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry MoonlightBureau.ipa Payload
+          ls -l MoonlightBureau.ipa
+          shasum -a 256 MoonlightBureau.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: MoonlightBureau-ipa
+          path: MoonlightBureau.ipa
+          retention-days: 30

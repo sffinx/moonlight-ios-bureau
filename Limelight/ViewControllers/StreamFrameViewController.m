@@ -186,16 +186,31 @@
                                                object: nil];
 #endif
     
-    // Only enable scroll and zoom in absolute touch mode
-    if (_settings.absoluteTouchMode) {
+    // Scroll and zoom in absolute touch mode.
+    // Moonlight Bureau: also pinch-to-zoom in trackpad mode on iOS. There, two-finger
+    // dragging stays the mouse wheel (no manual pan) and the zoomed view follows the
+    // cursor tracked by RelativeTouchHandler.
+    if (_settings.absoluteTouchMode || !TARGET_OS_TV) {
         _scrollView = [[UIScrollView alloc] initWithFrame:self.view.frame];
 #if !TARGET_OS_TV
         [_scrollView.panGestureRecognizer setMinimumNumberOfTouches:2];
+        if (!_settings.absoluteTouchMode) {
+            _scrollView.panGestureRecognizer.enabled = NO;
+            // No 150 ms delay before touches reach the trackpad handler
+            _scrollView.delaysContentTouches = NO;
+            [_scrollView setMaximumZoomScale:5.0f];
+            [[NSNotificationCenter defaultCenter] addObserver:self
+                                                     selector:@selector(trackpadCursorMoved:)
+                                                         name:@"MoonlightBureauCursorMoved"
+                                                       object:nil];
+        }
 #endif
         [_scrollView setShowsHorizontalScrollIndicator:NO];
         [_scrollView setShowsVerticalScrollIndicator:NO];
         [_scrollView setDelegate:self];
-        [_scrollView setMaximumZoomScale:10.0f];
+        if (_settings.absoluteTouchMode) {
+            [_scrollView setMaximumZoomScale:10.0f];
+        }
         
         // Add StreamView inside a UIScrollView for absolute mode
         [_scrollView addSubview:_streamView];
@@ -214,6 +229,41 @@
 - (UIView *)viewForZoomingInScrollView:(UIScrollView *)scrollView {
     return _streamView;
 }
+
+#if !TARGET_OS_TV
+// Moonlight Bureau: keep the trackpad cursor visible while zoomed, like Chrome Remote Desktop.
+// The view only moves when the cursor gets within 20% of an edge.
+- (void)trackpadCursorMoved:(NSNotification *)notification {
+    if (_scrollView == nil || _scrollView.zoomScale <= 1.01f) {
+        return;
+    }
+
+    CGPoint cursor = [[notification.userInfo objectForKey:@"point"] CGPointValue];
+    CGPoint p = [_streamView convertPoint:cursor toView:_scrollView];
+    CGSize visible = _scrollView.bounds.size;
+    CGPoint offset = _scrollView.contentOffset;
+    CGFloat marginX = visible.width * 0.2f;
+    CGFloat marginY = visible.height * 0.2f;
+    CGFloat x = offset.x, y = offset.y;
+
+    if (p.x < offset.x + marginX) {
+        x = p.x - marginX;
+    } else if (p.x > offset.x + visible.width - marginX) {
+        x = p.x - visible.width + marginX;
+    }
+    if (p.y < offset.y + marginY) {
+        y = p.y - marginY;
+    } else if (p.y > offset.y + visible.height - marginY) {
+        y = p.y - visible.height + marginY;
+    }
+
+    x = MIN(MAX(x, 0), MAX(_scrollView.contentSize.width - visible.width, 0));
+    y = MIN(MAX(y, 0), MAX(_scrollView.contentSize.height - visible.height, 0));
+    if (x != offset.x || y != offset.y) {
+        [_scrollView setContentOffset:CGPointMake(x, y) animated:NO];
+    }
+}
+#endif
 
 - (void)willMoveToParentViewController:(UIViewController *)parent {
     // Only cleanup when we're being destroyed

@@ -1,10 +1,7 @@
 name: CI
 
 on:
-  push:
-  pull_request:
-    branches:
-      - master
+  # Moonlight Bureau : lancement manuel seulement (le workflow IPA compile chaque push)
   workflow_dispatch:
 
 concurrency:

@@ -13,7 +13,22 @@
 static const int REFERENCE_WIDTH = 1280;
 static const int REFERENCE_HEIGHT = 720;
 
+#if !TARGET_OS_TV
+// Moonlight Bureau: the trackpad cursor is tracked here and sent as an absolute position,
+// so the zoomed view can follow it and its speed doesn't depend on the host resolution.
+// Finger movement is measured in StreamView points, which are already divided by the zoom
+// scale: the cursor gets more precise when zoomed in. Gain goes from MIN (slow finger) to
+// MAX (fast finger, ACCEL_POINTS or more per event).
+static const CGFloat CURSOR_GAIN_MIN = 1.0;
+static const CGFloat CURSOR_GAIN_MAX = 2.5;
+static const CGFloat CURSOR_ACCEL_POINTS = 12.0;
+#endif
+
 @implementation RelativeTouchHandler {
+#if !TARGET_OS_TV
+    CGPoint cursorLocation;
+    BOOL cursorKnown;
+#endif
     CGPoint touchLocation, originalLocation;
     BOOL touchMoved;
     BOOL isDragging;
@@ -25,7 +40,7 @@ static const int REFERENCE_HEIGHT = 720;
     UIGestureRecognizer* remoteLongPressRecognizer;
 #endif
     
-    UIView* view;
+    StreamView* view;
 }
 
 - (id)initWithView:(StreamView*)view {
@@ -45,6 +60,39 @@ static const int REFERENCE_HEIGHT = 720;
     
     return self;
 }
+
+#if !TARGET_OS_TV
+- (void)moveCursorByX:(CGFloat)dx y:(CGFloat)dy {
+    CGSize videoSize = [view getVideoAreaSize];
+    if (videoSize.width < 1 || videoSize.height < 1) {
+        return;
+    }
+    CGPoint origin = CGPointMake(view.bounds.size.width / 2 - videoSize.width / 2,
+                                 view.bounds.size.height / 2 - videoSize.height / 2);
+
+    // The host cursor position is unknown at the start: begin in the middle of the screen.
+    if (!cursorKnown) {
+        cursorLocation = CGPointMake(origin.x + videoSize.width / 2, origin.y + videoSize.height / 2);
+        cursorKnown = YES;
+    }
+
+    CGFloat speed = MIN(hypot(dx, dy) / CURSOR_ACCEL_POINTS, 1.0);
+    CGFloat gain = CURSOR_GAIN_MIN + (CURSOR_GAIN_MAX - CURSOR_GAIN_MIN) * speed;
+    cursorLocation.x = MIN(MAX(cursorLocation.x + dx * gain, origin.x), origin.x + videoSize.width - 0.5);
+    cursorLocation.y = MIN(MAX(cursorLocation.y + dy * gain, origin.y), origin.y + videoSize.height - 0.5);
+
+    // Send in physical pixels rather than points so the host gets full precision
+    CGFloat scale = view.window.screen.scale > 0 ? view.window.screen.scale : 1;
+    LiSendMousePositionEvent((short)((cursorLocation.x - origin.x) * scale),
+                             (short)((cursorLocation.y - origin.y) * scale),
+                             (short)(videoSize.width * scale),
+                             (short)(videoSize.height * scale));
+
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"MoonlightBureauCursorMoved"
+                                                        object:nil
+                                                      userInfo:@{@"point": [NSValue valueWithCGPoint:cursorLocation]}];
+}
+#endif
 
 - (BOOL)isConfirmedMove:(CGPoint)currentPoint from:(CGPoint)originalPoint {
     // Movements of greater than 5 pixels are considered confirmed
@@ -85,6 +133,17 @@ static const int REFERENCE_HEIGHT = 720;
         UITouch *touch = [[event allTouches] anyObject];
         CGPoint currentLocation = [touch locationInView:view];
         
+#if !TARGET_OS_TV
+        if (touchLocation.x != currentLocation.x ||
+            touchLocation.y != currentLocation.y)
+        {
+            [self moveCursorByX:currentLocation.x - touchLocation.x y:currentLocation.y - touchLocation.y];
+            touchLocation = currentLocation;
+            if ([self isConfirmedMove:touchLocation from:originalLocation]) {
+                touchMoved = true;
+            }
+        }
+#else
         if (touchLocation.x != currentLocation.x ||
             touchLocation.y != currentLocation.y)
         {
@@ -102,6 +161,7 @@ static const int REFERENCE_HEIGHT = 720;
                 }
             }
         }
+#endif
     } else if ([[event allTouches] count] == 2) {
         CGPoint firstLocation = [[[[event allTouches] allObjects] objectAtIndex:0] locationInView:view];
         CGPoint secondLocation = [[[[event allTouches] allObjects] objectAtIndex:1] locationInView:view];
