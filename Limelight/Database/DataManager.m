@@ -137,6 +137,52 @@
     }];
 }
 
+#pragma mark - Moonlight Bureau default profile
+
+static NSString* const BUREAU_PROFILE_KEY = @"MoonlightBureauProfileV1";
+
+// Safe-area size of this screen in landscape, in physical pixels (same rule as the
+// "Safe Area" resolution in Settings): long side minus the notch / Dynamic Island insets.
++ (CGSize) bureauSafeAreaSize {
+    UIScreen* screen = [UIScreen mainScreen];
+    CGFloat scale = screen.scale;
+    CGFloat longSide = MAX(screen.bounds.size.width, screen.bounds.size.height) * scale;
+    CGFloat shortSide = MIN(screen.bounds.size.width, screen.bounds.size.height) * scale;
+    UIEdgeInsets insets = UIApplication.sharedApplication.windows.firstObject.safeAreaInsets;
+    CGFloat inset = MAX(MAX(insets.left, insets.right), insets.top);
+    CGFloat width = floor((longSide - 2 * inset * scale) / 2) * 2;
+    return CGSizeMake(width, shortSide);
+}
+
+- (void) applyBureauProfile {
+    CGSize size = [DataManager bureauSafeAreaSize];
+    NSInteger framerate = [UIScreen mainScreen].maximumFramesPerSecond > 62 ? 120 : 60;
+    [self saveSettingsWithBitrate:30000           // 30 Mb/s (lower it on cellular)
+                        framerate:framerate
+                           height:(NSInteger)size.height
+                            width:(NSInteger)size.width
+                      audioConfig:2               // stereo
+                 onscreenControls:0               // OnScreenControlsLevelOff
+                    optimizeGames:YES             // lets the host virtual display match the phone
+                  multiController:NO
+                  swapABXYButtons:NO
+                        audioOnPC:NO
+                   preferredCodec:CODEC_PREF_HEVC
+                   useFramePacing:YES             // smoothest video
+                        enableHdr:NO
+                   btMouseSupport:NO
+                absoluteTouchMode:NO              // touchpad
+                     statsOverlay:NO];
+    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:BUREAU_PROFILE_KEY];
+}
+
+// Applied once (fresh install or first launch of this version); later changes are kept.
+- (void) applyBureauProfileIfNeeded {
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:BUREAU_PROFILE_KEY]) {
+        [self applyBureauProfile];
+    }
+}
+
 - (TemporarySettings*) getSettings {
     __block TemporarySettings *tempSettings;
     

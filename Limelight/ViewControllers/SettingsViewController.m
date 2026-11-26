@@ -16,6 +16,7 @@
 @implementation SettingsViewController {
     NSInteger _bitrate;
     NSInteger _lastSelectedResolutionIndex;
+    UIButton* _bureauProfileButton;
 }
 
 @dynamic overrideUserInterfaceStyle;
@@ -91,10 +92,65 @@ CGSize resolutionTable[RESOLUTION_TABLE_SIZE];
         }
     }
     
+#if !TARGET_OS_TV
+    // Moonlight Bureau: "default phone profile" button below the last setting
+    if (_bureauProfileButton == nil) {
+        _bureauProfileButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        [_bureauProfileButton setTitle:@"Profil iPhone par défaut" forState:UIControlStateNormal];
+        _bureauProfileButton.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+        _bureauProfileButton.backgroundColor = [UIColor colorWithWhite:1 alpha:0.12];
+        _bureauProfileButton.layer.cornerRadius = 10;
+        [_bureauProfileButton addTarget:self action:@selector(bureauApplyProfile) forControlEvents:UIControlEventTouchUpInside];
+        [self.scrollView addSubview:_bureauProfileButton];
+    }
+    CGFloat buttonX = self.bitrateSlider.frame.origin.x;
+    CGFloat buttonWidth = MAX(self.bitrateSlider.frame.size.width, 240);
+    _bureauProfileButton.frame = CGRectMake(buttonX, highestViewY + 20, buttonWidth, 44);
+    highestViewY += 20 + 44;
+#endif
+
     // Add a bit of padding so the view doesn't end right at the button of the display
     self.scrollView.contentSize = CGSizeMake(self.scrollView.contentSize.width,
                                              highestViewY + 20);
 }
+
+#if !TARGET_OS_TV
+// Moonlight Bureau: saves the default profile, then shows it in the selectors (which are
+// what saveSettings reads when the settings screen closes).
+- (void) bureauApplyProfile {
+    DataManager* dataMan = [[DataManager alloc] init];
+    [dataMan applyBureauProfile];
+    TemporarySettings* settings = [dataMan getSettings];
+
+    for (int i = 0; i < RESOLUTION_TABLE_SIZE; i++) {
+        if ((int)resolutionTable[i].width == [settings.width intValue] &&
+            (int)resolutionTable[i].height == [settings.height intValue]) {
+            [self.resolutionSelector setSelectedSegmentIndex:i];
+            _lastSelectedResolutionIndex = i;
+            break;
+        }
+    }
+    [self.framerateSelector setSelectedSegmentIndex:self.framerateSelector.numberOfSegments > 2 ? 2 : 1];
+    _bitrate = [settings.bitrate integerValue];
+    [self.bitrateSlider setValue:[self getSliderValueForBitrate:_bitrate] animated:YES];
+    [self.touchModeSelector setSelectedSegmentIndex:0];
+    [self.onscreenControlSelector setSelectedSegmentIndex:0];
+    [self.onscreenControlSelector setEnabled:YES];
+    [self.optimizeSettingsSelector setSelectedSegmentIndex:1];
+    [self.multiControllerSelector setSelectedSegmentIndex:0];
+    [self.swapABXYButtonsSelector setSelectedSegmentIndex:0];
+    [self.audioOnPCSelector setSelectedSegmentIndex:0];
+    [self.codecSelector setSelectedSegmentIndex:1]; // HEVC (segment 1 whenever HEVC is supported)
+    if (self.hdrSelector.isEnabled) {
+        [self.hdrSelector setSelectedSegmentIndex:0];
+    }
+    [self.framePacingSelector setSelectedSegmentIndex:1];
+    [self.btMouseSelector setSelectedSegmentIndex:0];
+    [self.statsOverlaySelector setSelectedSegmentIndex:0];
+    [self updateBitrateText];
+    [self updateResolutionDisplayViewText];
+}
+#endif
 
 // Adjust the subviews for the safe area on the iPhone X.
 - (void)viewSafeAreaInsetsDidChange {

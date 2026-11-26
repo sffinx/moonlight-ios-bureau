@@ -1095,6 +1095,11 @@ static NSMutableSet* hostList;
 - (void)viewDidAppear:(BOOL)animated
 {
     [super viewDidAppear:animated];
+
+#if !TARGET_OS_TV
+    // Moonlight Bureau: default phone profile on first launch
+    [[[DataManager alloc] init] applyBureauProfileIfNeeded];
+#endif
     
 #if !TARGET_OS_TV
     [[self revealViewController] setPrimaryViewController:self];

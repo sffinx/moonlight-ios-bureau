@@ -38,6 +38,10 @@
 
 - (TemporarySettings*) getSettings;
 
+// Moonlight Bureau: default profile for this phone (Safe Area, 120 FPS, 30 Mb/s, touchpad, HEVC...)
+- (void) applyBureauProfile;
+- (void) applyBureauProfileIfNeeded;
+
 - (void) updateUniqueId:(NSString*)uniqueId;
 - (NSString*) getUniqueId;
 
