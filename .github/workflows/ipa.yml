@@ -74,7 +74,8 @@ jobs:
           python3 - "$VERSION" "$BUILD" "$BUNDLE" "$SIZE" "$DATE" "$REPO" "$SHA" <<'PY'
           import json, sys
           version, build, bundle, size, date, repo, sha = sys.argv[1:]
-          url = f"https://github.com/{repo}/releases/download/latest/MoonlightBureau.ipa"
+          # Une adresse par build : une adresse fixe laisse SideStore réutiliser une IPA ou une source en cache
+          url = f"https://github.com/{repo}/releases/download/latest/MoonlightBureau-{build}.ipa"
           icon = f"https://raw.githubusercontent.com/{repo}/bureau/Limelight/Images.xcassets/AppIcon.appiconset/1024x%20icon.png"
           desc = ("Moonlight iOS, mode bureau : zoom en pinçant en mode Touchpad, vue qui suit le curseur, "
                   "barre d'outils (texte Unicode, raccourcis, collage depuis l'iPhone).")
@@ -112,4 +113,9 @@ jobs:
           else
             gh release create latest -R "$REPO" --title "Moonlight Bureau (dernière build)" --notes "$NOTES" --target "${{ github.sha }}"
           fi
-          gh release upload latest MoonlightBureau.ipa source.json -R "$REPO" --clobber
+          cp MoonlightBureau.ipa "MoonlightBureau-${BUILD}.ipa"
+          gh release upload latest MoonlightBureau.ipa "MoonlightBureau-${BUILD}.ipa" source.json -R "$REPO" --clobber
+          # Garder seulement l'IPA numérotée de cette build
+          for old in $(gh release view latest -R "$REPO" --json assets -q '.assets[].name' | grep -E '^MoonlightBureau-[0-9]+\.ipa$' | grep -v "^MoonlightBureau-${BUILD}\.ipa$" || true); do
+            gh release delete-asset latest "$old" -R "$REPO" -y
+          done
