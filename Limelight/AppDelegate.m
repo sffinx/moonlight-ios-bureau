@@ -67,6 +67,14 @@ static NSString* DB_NAME = @"Limelight_iOS.sqlite";
 
 - (void)applicationWillTerminate:(UIApplication *)application
 {
+#if !TARGET_OS_TV
+    // Moonlight Bureau: app swiped away from the app switcher. iOS sends this to an app that is
+    // running in the background (ours keeps running with background audio), not to a suspended
+    // one. Option "Fermer la session sur le PC": ask the PC to close it (a few seconds at most).
+    if ([[NSUserDefaults standardUserDefaults] boolForKey:@"MoonlightBureauQuitOnKill"]) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"MoonlightBureauWillTerminate" object:nil];
+    }
+#endif
     // Saves changes in the application's managed object context before the application terminates.
     [self saveContext];
 }

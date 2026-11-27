@@ -17,6 +17,8 @@
     NSInteger _bitrate;
     NSInteger _lastSelectedResolutionIndex;
     UIButton* _bureauProfileButton;
+    UILabel* _bureauQuitLabel;
+    UISwitch* _bureauQuitSwitch;
 }
 
 @dynamic overrideUserInterfaceStyle;
@@ -80,6 +82,9 @@ CGSize resolutionTable[RESOLUTION_TABLE_SIZE];
         // UIScrollViews have 2 default child views
         // which represent the horizontal and vertical scrolling
         // indicators. Ignore any views we don't recognize.
+        if (view.tag == 4242) {
+            continue; // Moonlight Bureau's own rows, placed below
+        }
         if (![view isKindOfClass:[UILabel class]] &&
             ![view isKindOfClass:[UISegmentedControl class]] &&
             ![view isKindOfClass:[UISlider class]]) {
@@ -107,6 +112,30 @@ CGSize resolutionTable[RESOLUTION_TABLE_SIZE];
     CGFloat buttonWidth = MAX(self.bitrateSlider.frame.size.width, 240);
     _bureauProfileButton.frame = CGRectMake(buttonX, highestViewY + 20, buttonWidth, 44);
     highestViewY += 20 + 44;
+
+    // Moonlight Bureau: what closing the app from the app switcher does to the PC session
+    if (_bureauQuitSwitch == nil) {
+        _bureauQuitLabel = [[UILabel alloc] init];
+        _bureauQuitLabel.tag = 4242;
+        _bureauQuitLabel.numberOfLines = 0;
+        _bureauQuitLabel.textColor = UIColor.whiteColor;
+        _bureauQuitLabel.font = [UIFont systemFontOfSize:15];
+        _bureauQuitLabel.text = @"Fermer la session sur le PC quand je ferme l'appli (balayée du multitâche)\nDésactivé : la session reste ouverte, on la reprend plus tard.";
+        [self.scrollView addSubview:_bureauQuitLabel];
+        _bureauQuitSwitch = [[UISwitch alloc] init];
+        _bureauQuitSwitch.tag = 4242;
+        _bureauQuitSwitch.on = [[NSUserDefaults standardUserDefaults] boolForKey:@"MoonlightBureauQuitOnKill"];
+        [_bureauQuitSwitch addTarget:self action:@selector(bureauQuitSwitchChanged) forControlEvents:UIControlEventValueChanged];
+        [self.scrollView addSubview:_bureauQuitSwitch];
+    }
+    CGSize switchSize = _bureauQuitSwitch.intrinsicContentSize;
+    CGFloat labelWidth = MAX(buttonWidth - switchSize.width - 12, 160);
+    CGSize labelSize = [_bureauQuitLabel sizeThatFits:CGSizeMake(labelWidth, CGFLOAT_MAX)];
+    CGFloat rowHeight = MAX(labelSize.height, switchSize.height);
+    _bureauQuitLabel.frame = CGRectMake(buttonX, highestViewY + 20, labelWidth, labelSize.height);
+    _bureauQuitSwitch.frame = CGRectMake(buttonX + labelWidth + 12, highestViewY + 20 + (rowHeight - switchSize.height) / 2,
+                                         switchSize.width, switchSize.height);
+    highestViewY += 20 + rowHeight;
 #endif
 
     // Add a bit of padding so the view doesn't end right at the button of the display
@@ -115,6 +144,10 @@ CGSize resolutionTable[RESOLUTION_TABLE_SIZE];
 }
 
 #if !TARGET_OS_TV
+- (void) bureauQuitSwitchChanged {
+    [[NSUserDefaults standardUserDefaults] setBool:_bureauQuitSwitch.on forKey:@"MoonlightBureauQuitOnKill"];
+}
+
 // Moonlight Bureau: saves the default profile, then shows it in the selectors (which are
 // what saveSettings reads when the settings screen closes).
 - (void) bureauApplyProfile {

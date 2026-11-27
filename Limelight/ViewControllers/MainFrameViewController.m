@@ -1121,6 +1121,33 @@ static NSMutableSet* hostList;
 
 #pragma mark Moonlight Bureau: direct launch and resume
 
+// App closed from the app switcher with the option on: close the session on the PC
+// (synchronous: iOS ends the app right after applicationWillTerminate returns)
+- (void)bureauQuitOnTerminate {
+    TemporaryHost *host = _selectedHost;
+    if (host == nil) {
+        NSString *uuid = [[NSUserDefaults standardUserDefaults] stringForKey:@"MoonlightBureauLastHost"];
+        @synchronized (hostList) {
+            for (TemporaryHost *h in hostList) {
+                if ([h.uuid isEqualToString:uuid]) {
+                    host = h;
+                }
+            }
+        }
+    }
+    if (host == nil || host.pairState != PairStatePaired) {
+        return;
+    }
+    Log(LOG_I, @"Moonlight Bureau: app closed, quitting the session on %@", host.name);
+    HttpManager *hMan = [[HttpManager alloc] initWithHost:host];
+    NSURLRequest *quit = [hMan newQuitAppRequest];
+    if (quit != nil) {
+        HttpResponse *response = [[HttpResponse alloc] init];
+        [hMan executeRequestSynchronously:[HttpRequest requestForResponse:response withUrlRequest:quit]];
+    }
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"MoonlightBureauResumeAt"];
+}
+
 static NSString *const BUREAU_RESUME_KEY = @"MoonlightBureauResumeAt";
 
 // Set by the stream screen when iOS sends the app to the background mid-session
@@ -1304,6 +1331,11 @@ static NSString *const BUREAU_RESUME_KEY = @"MoonlightBureauResumeAt";
         [self hostClicked:_selectedHost view:nil];
     }
     
+#if !TARGET_OS_TV
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"MoonlightBureauWillTerminate" object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(bureauQuitOnTerminate)
+                                                 name:@"MoonlightBureauWillTerminate" object:nil];
+#endif
     [[NSNotificationCenter defaultCenter] addObserver: self
                                              selector: @selector(handleReturnToForeground)
                                                  name: UIApplicationDidBecomeActiveNotification
@@ -1347,6 +1379,11 @@ static NSString *const BUREAU_RESUME_KEY = @"MoonlightBureauResumeAt";
     // Remove our lifetime observers to avoid triggering them
     // while streaming
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+#if !TARGET_OS_TV
+    // ...except closing the app, which matters most while streaming
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(bureauQuitOnTerminate)
+                                                 name:@"MoonlightBureauWillTerminate" object:nil];
+#endif
 }
 
 - (void) retrieveSavedHosts {
