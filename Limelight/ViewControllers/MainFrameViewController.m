@@ -125,6 +125,7 @@ static NSMutableSet* hostList;
 - (void)disableUpButton {
 #if !TARGET_OS_TV
     [self->_upButton setTitle:nil];
+    [self->_upButton setImage:nil];
     // Moonlight Bureau: an untitled bar button still draws an empty glass capsule on iOS 26+
     if (@available(iOS 16.0, *)) {
         self->_upButton.hidden = YES;
@@ -134,7 +135,8 @@ static NSMutableSet* hostList;
 
 - (void)enableUpButton {
 #if !TARGET_OS_TV
-    [self->_upButton setTitle:@"Select New Host"];
+    [self->_upButton setTitle:@"Mes PC"];
+    [self->_upButton setImage:[UIImage systemImageNamed:@"chevron.left"]];
     if (@available(iOS 16.0, *)) {
         self->_upButton.hidden = NO;
     }
@@ -146,10 +148,10 @@ static NSMutableSet* hostList;
         self.title = _selectedHost.name;
     }
     else if ([hostList count] == 0) {
-        self.title = @"Searching for PCs on your network...";
+        self.title = @"Recherche des PC…";
     }
     else {
-        self.title = @"Select Host";
+        self.title = @"Mes PC";
     }
 }
 
@@ -952,7 +954,10 @@ static NSMutableSet* hostList;
     [self disableUpButton];
     
     // Set the gesture
-    [self.view addGestureRecognizer:self.revealViewController.panGestureRecognizer];
+    // Moonlight Bureau: no sideways swipe (it moved the whole screen); gear button only
+    [_settingsButton setTitle:nil];
+    [_settingsButton setImage:[UIImage systemImageNamed:@"gearshape"]];
+    _settingsButton.accessibilityLabel = @"Réglages";
     
     // Get callbacks associated with the viewController
     [self.revealViewController setDelegate:self];
@@ -1216,11 +1221,14 @@ static NSString *const BUREAU_RESUME_KEY = @"MoonlightBureauResumeAt";
     _bureauBackground.frame = self.collectionView.backgroundView.bounds.size.width > 0 ? self.collectionView.backgroundView.bounds : self.view.bounds;
     [CATransaction commit];
 
-    CGFloat top = self.view.safeAreaInsets.top;
-    hostScrollView.frame = CGRectMake(0, top, self.view.bounds.size.width, MAX(self.view.bounds.size.height - top - self.view.safeAreaInsets.bottom, 200));
-    if (fabs(_bureauHostsWidth - self.view.bounds.size.width) > 0.5) {
-        _bureauHostsWidth = self.view.bounds.size.width;
-        [self updateHosts];
+    CGRect area = self.collectionView.safeAreaLayoutGuide.layoutFrame;
+    if (!CGRectEqualToRect(hostScrollView.frame, area)) {
+        hostScrollView.frame = area;
+    }
+    CGFloat key = area.size.width * 10000 + area.size.height;
+    if (fabs(_bureauHostsWidth - key) > 0.5) {
+        _bureauHostsWidth = key;
+        [self bureauLayoutHostCards];
         [self.collectionView.collectionViewLayout invalidateLayout];
     }
 }
@@ -1247,6 +1255,23 @@ static NSString *const BUREAU_RESUME_KEY = @"MoonlightBureauResumeAt";
     
     [self.navigationController setNavigationBarHidden:NO animated:YES];
     
+#if !TARGET_OS_TV
+    // Moonlight Bureau: transparent bar over the gradient, white title
+    UINavigationBarAppearance* bar = [[UINavigationBarAppearance alloc] init];
+    [bar configureWithTransparentBackground];
+    bar.titleTextAttributes = @{
+        NSForegroundColorAttributeName: UIColor.whiteColor,
+        NSFontAttributeName: [UIFont systemFontOfSize:18 weight:UIFontWeightBold],
+    };
+    UINavigationBar* navBar = self.navigationController.navigationBar;
+    navBar.standardAppearance = bar;
+    navBar.scrollEdgeAppearance = bar;
+    navBar.compactAppearance = bar;
+    navBar.compactScrollEdgeAppearance = bar;
+    navBar.tintColor = UIColor.whiteColor;
+    navBar.translucent = YES;
+#endif
+
     // Hide 1px border line
     UIImage* fakeImage = [[UIImage alloc] init];
     [self.navigationController.navigationBar setShadowImage:fakeImage];
@@ -1409,21 +1434,60 @@ static NSString *const BUREAU_RESUME_KEY = @"MoonlightBureauResumeAt";
     [hostScrollView addSubview:addComp];
     [hostScrollView setContentSize:CGSizeMake(prevEdge + addComp.frame.size.width, hostScrollView.frame.size.height)];
 #if !TARGET_OS_TV
-    // Moonlight Bureau: cards centered on screen (row centered, vertically too)
-    CGFloat left = CGFLOAT_MAX, right = 0;
-    for (UIView* v in hostScrollView.subviews) {
-        left = MIN(left, v.frame.origin.x);
-        right = MAX(right, CGRectGetMaxX(v.frame));
-    }
-    CGFloat shift = (hostScrollView.frame.size.width - (right - left)) / 2 - left;
-    if (shift > 0) {
-        for (UIView* v in hostScrollView.subviews) {
-            v.center = CGPointMake(v.center.x + shift, v.center.y);
-        }
-        [hostScrollView setContentSize:CGSizeMake(hostScrollView.frame.size.width, hostScrollView.frame.size.height)];
-    }
+    [self bureauLayoutHostCards];
 #endif
 }
+
+#if !TARGET_OS_TV
+// Moonlight Bureau: PC cards in a centered grid that fits the width (2 per row on a phone
+// in portrait, more in landscape); centered vertically when they fit, scrolls otherwise.
+- (void)bureauLayoutHostCards {
+    NSArray<UIView*>* cards = hostScrollView.subviews;
+    CGSize area = hostScrollView.bounds.size;
+    if (cards.count == 0 || area.width < 1) {
+        return;
+    }
+    const CGFloat spacing = 16, margin = 16;
+    CGFloat cardW = cards.firstObject.bounds.size.width, cardH = cards.firstObject.bounds.size.height;
+    NSInteger columns = MAX(1, (NSInteger)floor((area.width - 2 * margin + spacing) / (cardW + spacing)));
+    columns = MIN(columns, (NSInteger)cards.count);
+    NSInteger rows = ((NSInteger)cards.count + columns - 1) / columns;
+    CGFloat gridH = rows * cardH + (rows - 1) * spacing;
+    CGFloat top = MAX(margin, (area.height - gridH) / 2);
+    for (NSInteger k = 0; k < (NSInteger)cards.count; k++) {
+        NSInteger row = k / columns, col = k % columns;
+        NSInteger inRow = MIN(columns, (NSInteger)cards.count - row * columns);
+        CGFloat rowW = inRow * cardW + (inRow - 1) * spacing;
+        CGFloat left = (area.width - rowW) / 2;
+        cards[k].center = CGPointMake(left + col * (cardW + spacing) + cardW / 2,
+                                      top + row * (cardH + spacing) + cardH / 2);
+    }
+    hostScrollView.contentSize = CGSizeMake(area.width, MAX(area.height, top + gridH + margin));
+    hostScrollView.alwaysBounceHorizontal = NO;
+    hostScrollView.alwaysBounceVertical = NO;
+    hostScrollView.showsVerticalScrollIndicator = NO;
+}
+
+// App tiles: as many columns as fit (3 in portrait), poster ratio 3:4, even margins
+- (CGSize)collectionView:(UICollectionView *)collectionView layout:(UICollectionViewLayout *)layout sizeForItemAtIndexPath:(NSIndexPath *)indexPath {
+    CGFloat width = collectionView.safeAreaLayoutGuide.layoutFrame.size.width - 32;
+    NSInteger columns = MAX(2, (NSInteger)floor((width + 14) / (118 + 14)));
+    CGFloat w = floor((width - (columns - 1) * 14) / columns);
+    return CGSizeMake(w, floor(w * 4 / 3));
+}
+
+- (UIEdgeInsets)collectionView:(UICollectionView *)collectionView layout:(UICollectionViewLayout *)layout insetForSectionAtIndex:(NSInteger)section {
+    return UIEdgeInsetsMake(16, 16, 16, 16);
+}
+
+- (CGFloat)collectionView:(UICollectionView *)collectionView layout:(UICollectionViewLayout *)layout minimumInteritemSpacingForSectionAtIndex:(NSInteger)section {
+    return 14;
+}
+
+- (CGFloat)collectionView:(UICollectionView *)collectionView layout:(UICollectionViewLayout *)layout minimumLineSpacingForSectionAtIndex:(NSInteger)section {
+    return 18;
+}
+#endif
 
 - (float) getCompViewX:(UIComputerView*)comp addComp:(UIComputerView*)addComp prevEdge:(float)prevEdge {
     float padding;

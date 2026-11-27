@@ -189,6 +189,11 @@ BOOL isCustomResolution(CGSize res) {
     if (@available(iOS 13.0, tvOS 13.0, *)) {
         self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     }
+#if !TARGET_OS_TV
+    // Moonlight Bureau: same night-blue as the main screen
+    self.view.backgroundColor = [UIColor colorWithRed:0.06 green:0.08 blue:0.15 alpha:1];
+    self.scrollView.backgroundColor = UIColor.clearColor;
+#endif
     
     DataManager* dataMan = [[DataManager alloc] init];
     TemporarySettings* currentSettings = [dataMan getSettings];
