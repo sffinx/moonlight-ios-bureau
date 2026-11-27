@@ -973,7 +973,7 @@ static NSMutableSet* hostList;
                                                             style:UIBarButtonItemStylePlain
                                                            target:self
                                                            action:@selector(bureauShowTailscale)];
-    _bureauTailscaleItem.accessibilityLabel = @"Tailscale";
+    _bureauTailscaleItem.accessibilityLabel = @"Accès à distance";
     NSArray *rightItems = self.navigationItem.rightBarButtonItems ?: @[];
     self.navigationItem.rightBarButtonItems = [rightItems arrayByAddingObject:_bureauTailscaleItem];
     _bureauTailscaleTimer = [NSTimer scheduledTimerWithTimeInterval:2 target:self selector:@selector(bureauPollTailscale) userInfo:nil repeats:YES];
@@ -1181,6 +1181,7 @@ static NSMutableSet* hostList;
     _bureauTailscaleWasForwarding = forwarding;
     // First launch: ask once for the Tailscale login (then it is remembered)
     if ([state isEqualToString:@"NeedsLogin"] && authURL.length > 0 && !_bureauTailscaleLoginShown &&
+        ![[NSUserDefaults standardUserDefaults] boolForKey:@"MoonlightBureauRemoteAsked"] &&
         self.navigationController.topViewController == self && self.presentedViewController == nil &&
         self.view.window != nil) {
         _bureauTailscaleLoginShown = YES;
@@ -1188,26 +1189,31 @@ static NSMutableSet* hostList;
     }
 }
 
-// The phone PC (Sunshine Tel, HTTP port 48989) gets the relay address 127.0.0.1:48989; its
+// Paired PCs get the relay address 127.0.0.1:<their Sunshine HTTP port>; their
 // other addresses stay, so the Tailscale app (VPN) or the home network still work as well.
 - (void)bureauUseRelayAddress {
-    NSString *relay = @"127.0.0.1:48989";
     @synchronized (hostList) {
         for (TemporaryHost *host in hostList) {
-            if ([host.address isEqualToString:relay]) {
+            // Only PCs already paired with this phone; port = the PC's Sunshine HTTP port
+            // (pairing state is only known once the PC answers, which needs the relay: the
+            // certificate saved at pairing says it instead)
+            if (host.serverCert == nil) {
                 continue;
             }
-            BOOL phonePC = NO;
-            for (NSString *a in @[host.address ?: @"", host.localAddress ?: @"", host.externalAddress ?: @"", host.activeAddress ?: @""]) {
+            NSString *port = nil;
+            for (NSString *a in @[host.activeAddress ?: @"", host.address ?: @"", host.localAddress ?: @"", host.externalAddress ?: @""]) {
                 if ([a hasSuffix:@":48989"]) {
-                    phonePC = YES;
+                    port = @"48989";
+                    break;
                 }
             }
-            if (!phonePC) {
+            port = port ?: @"47989";
+            NSString *hostRelay = [@"127.0.0.1:" stringByAppendingString:port];
+            if ([host.address isEqualToString:hostRelay]) {
                 continue;
             }
             Log(LOG_I, @"Moonlight Bureau: %@ reachable through the in-app Tailscale relay", host.name);
-            host.address = relay;
+            host.address = hostRelay;
             [[[DataManager alloc] init] updateHost:host];
         }
     }
@@ -1216,8 +1222,8 @@ static NSMutableSet* hostList;
 // Always a fresh link: an old one stays stuck on the error of a failed attempt (wrong account)
 - (void)bureauOpenFreshTailscaleLogin {
     // A few seconds while Tailscale prepares the link: say so, with a spinner
-    UIAlertController *wait = [UIAlertController alertControllerWithTitle:@"Préparation de la connexion…"
-                                                                  message:@"Tailscale prépare la page de connexion (quelques secondes).\n\n\n"
+    UIAlertController *wait = [UIAlertController alertControllerWithTitle:@"Ouverture de la connexion…"
+                                                                  message:@"La page de connexion Tailscale s'ouvre dans quelques secondes.\n\n\n"
                                                            preferredStyle:UIAlertControllerStyleAlert];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
     spinner.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1245,35 +1251,63 @@ static NSMutableSet* hostList;
     });
 }
 
+// Remote access window, written for anyone: what it does, what to do on the phone and on the
+// PC, who is connected, and how to sign out.
 - (void)bureauShowTailscale {
     NSDictionary *ts = _bureauTailscale ?: @{};
     NSString *state = ts[@"state"] ?: @"";
-    NSString *authURL = ts[@"authURL"] ?: @"";
-    NSMutableString *message = [NSMutableString string];
-    if ([ts[@"forwarding"] boolValue]) {
-        [message appendFormat:@"Connecté, sans VPN.\nPC « %@ » : %@\nCet iPhone : %@", ts[@"targetName"], ts[@"target"], ts[@"selfIP"]];
+    NSString *account = ts[@"account"] ?: @"";
+    NSString *pcName = ts[@"targetName"] ?: @"";
+    BOOL connected = [state isEqualToString:@"Running"];
+    BOOL ready = [ts[@"forwarding"] boolValue];
+    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"MoonlightBureauRemoteAsked"];
+
+    NSString *title;
+    NSString *message;
+    if (ready) {
+        title = @"Accès à distance activé";
+        message = [NSString stringWithFormat:@"Ton PC « %@ » est joignable partout, en Wi-Fi comme en 4G/5G.\n\nCompte Tailscale : %@", pcName, account];
+    } else if (connected) {
+        title = @"Accès à distance";
+        message = [NSString stringWithFormat:@"Connecté au compte %@, mais aucun PC n'est joignable pour l'instant.\n\nSur le PC, vérifie que :\n• il est allumé ;\n• Tailscale y est connecté avec ce même compte ;\n• Sunshine est lancé.", account];
     } else if ([state isEqualToString:@"NeedsLogin"]) {
-        [message appendString:@"Tailscale est intégré à l'appli : plus besoin de l'appli Tailscale ni du VPN. Connecte-toi une fois à ton compte Tailscale (le même que sur le PC), l'appli s'en souviendra."];
+        title = @"Accès à distance";
+        message = @"Pour utiliser ton PC hors de chez toi, connecte l'appli à Tailscale (gratuit).\n\nSur le PC : installe Tailscale (tailscale.com/download) et connecte-toi.\nIci : appuie sur « Se connecter » et utilise le même compte que sur le PC.";
     } else {
-        [message appendFormat:@"État : %@", state];
-        NSString *error = ts[@"error"];
-        if (error.length > 0) {
-            [message appendFormat:@"\n%@", error];
-        }
-        NSArray *log = ts[@"log"];
-        if ([log isKindOfClass:[NSArray class]] && log.count > 0) {
-            NSArray *tail = [log subarrayWithRange:NSMakeRange(log.count > 5 ? log.count - 5 : 0, MIN(log.count, (NSUInteger)5))];
-            [message appendFormat:@"\n\n%@", [tail componentsJoinedByString:@"\n"]];
-        }
+        title = @"Accès à distance";
+        message = @"Démarrage en cours…";
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Tailscale intégré" message:message preferredStyle:UIAlertControllerStyleAlert];
-    if (authURL.length > 0 && ![ts[@"forwarding"] boolValue]) {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
+    if ([state isEqualToString:@"NeedsLogin"]) {
         [alert addAction:[UIAlertAction actionWithTitle:@"Se connecter" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
             [self bureauOpenFreshTailscaleLogin];
         }]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Plus tard" style:UIAlertActionStyleCancel handler:nil]];
+    } else {
+        if (connected) {
+            [alert addAction:[UIAlertAction actionWithTitle:@"Se déconnecter" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+                [self bureauConfirmTailscaleLogout];
+            }]];
+        }
+        [alert addAction:[UIAlertAction actionWithTitle:@"Fermer" style:UIAlertActionStyleCancel handler:nil]];
     }
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
     [[self activeViewController] presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)bureauConfirmTailscaleLogout {
+    UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Se déconnecter ?"
+                                                                    message:@"Tu ne pourras plus joindre ton PC hors de chez toi tant que tu ne te reconnectes pas."
+                                                             preferredStyle:UIAlertControllerStyleAlert];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"Annuler" style:UIAlertActionStyleCancel handler:nil]];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"Se déconnecter" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            MBTailscaleLogout();
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self bureauPollTailscale];
+            });
+        });
+    }]];
+    [[self activeViewController] presentViewController:confirm animated:YES completion:nil];
 }
 
 #pragma mark Moonlight Bureau: direct launch and resume

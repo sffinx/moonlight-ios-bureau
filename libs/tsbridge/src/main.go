@@ -1,8 +1,10 @@
 // Moonlight Bureau: Tailscale inside the app, without the Tailscale app and without an iOS VPN.
 //
 // tsnet runs a Tailscale node in the app process (userspace WireGuard and network stack). The
-// bridge listens on 127.0.0.1 for the ports of the PC's "Sunshine Tel" instance (TCP and UDP)
-// and relays everything to the PC over the tailnet. Moonlight then connects to 127.0.0.1.
+// bridge listens on 127.0.0.1 for the Sunshine ports (default base 47989 and the 48989 base of a
+// second instance), TCP and UDP, and relays everything to the PC over the tailnet. Moonlight
+// then connects to 127.0.0.1. The PC is found by itself: the online computer of the account
+// that answers on a Sunshine port (a preferred name, if given, is tried first).
 //
 // Built as a C archive for iOS (go build -buildmode=c-archive), called from Objective-C.
 package main
@@ -23,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"tailscale.com/ipn/ipnstate"
@@ -38,7 +41,10 @@ var (
 	selfIP     string
 	targetIP   string
 	targetName string
+	preferred  string
+	account    string
 	forwarding bool
+	loggedOut  bool
 	lastError  string
 	logLines   []string
 )
@@ -70,7 +76,7 @@ func MBTailscaleStart(dir, hostname, peer *C.char, portStart, portEnd C.int) {
 		return
 	}
 	started = true
-	targetName = C.GoString(peer)
+	preferred = C.GoString(peer)
 	mu.Unlock()
 	go run(C.GoString(dir), C.GoString(hostname), int(portStart), int(portEnd))
 }
@@ -87,11 +93,43 @@ func MBTailscaleStatus() *C.char {
 		"selfIP":     selfIP,
 		"target":     targetIP,
 		"targetName": targetName,
+		"account":    account,
 		"forwarding": forwarding,
 		"error":      lastError,
 		"log":        logLines,
 	})
 	return C.CString(string(out))
+}
+
+// MBTailscaleLogout signs this device out of Tailscale (the relay stops reaching the PC).
+// Blocks up to 10 s; call it off the main thread.
+//
+//export MBTailscaleLogout
+func MBTailscaleLogout() {
+	mu.Lock()
+	s := server
+	mu.Unlock()
+	if s == nil {
+		return
+	}
+	lc, err := s.LocalClient()
+	if err != nil {
+		setError(err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := lc.Logout(ctx); err != nil {
+		setError(err)
+		return
+	}
+	mu.Lock()
+	loggedOut = true
+	forwarding = false
+	targetIP, targetName, account, authURL = "", "", "", ""
+	state = "NeedsLogin"
+	mu.Unlock()
+	addLog("déconnecté de Tailscale")
 }
 
 // MBTailscaleLogin asks Tailscale for a fresh login link and returns it (empty when already
@@ -164,9 +202,30 @@ func MBTailscaleLogin() *C.char {
 	return C.CString(url)
 }
 
-func run(dir string, hostname string, portStart, portEnd int) {
+// Sunshine ports relayed, for both bases: HTTPS, HTTP, video, control, audio, mic, RTSP
+// (offsets -5, 0, +9, +10, +11, +13, +21 from the HTTP port).
+var relayPorts = func() []int {
+	var ports []int
+	for _, base := range []int{47989, 48989} {
+		for _, off := range []int{-5, 0, 9, 10, 11, 13, 21} {
+			ports = append(ports, base+off)
+		}
+	}
+	return ports
+}()
+
+func run(dir string, hostname string, _ int, _ int) {
 	// No log upload to Tailscale's servers
 	os.Setenv("TS_NO_LOGS_NO_SUPPORT", "true")
+	// iOS allows 256 open files by default; the relay and Tailscale need more
+	var lim syscall.Rlimit
+	if syscall.Getrlimit(syscall.RLIMIT_NOFILE, &lim) == nil && lim.Cur < 4096 {
+		lim.Cur = 4096
+		if lim.Max < lim.Cur {
+			lim.Cur = lim.Max
+		}
+		syscall.Setrlimit(syscall.RLIMIT_NOFILE, &lim)
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		setError(err)
 		return
@@ -192,6 +251,7 @@ func run(dir string, hostname string, portStart, portEnd int) {
 	addLog("nœud Tailscale démarré")
 
 	forwardersUp := false
+	var lastProbe time.Time
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		st, err := lc.Status(ctx)
@@ -204,51 +264,117 @@ func run(dir string, hostname string, portStart, portEnd int) {
 		mu.Lock()
 		state = st.BackendState
 		authURL = st.AuthURL
+		if st.BackendState == "Running" {
+			loggedOut = false
+		}
 		if st.Self != nil && len(st.Self.TailscaleIPs) > 0 {
 			selfIP = st.Self.TailscaleIPs[0].String()
 		}
-		if st.BackendState == "Running" {
-			if ip := findPeer(st, targetName); ip != "" {
-				if ip != targetIP {
-					targetIP = ip
-					lastError = ""
-				}
-			} else {
-				lastError = "PC « " + targetName + " » introuvable dans Tailscale"
+		account = ""
+		if st.Self != nil {
+			if u, ok := st.User[st.Self.UserID]; ok {
+				account = u.LoginName
 			}
 		}
+		current := targetIP
+		mu.Unlock()
+
+		if st.BackendState == "Running" {
+			// Keep the current PC while it is online; otherwise look again (every 15 s)
+			if current == "" || !peerOnline(st, current) {
+				if time.Since(lastProbe) > 15*time.Second || current != "" {
+					lastProbe = time.Now()
+					ip, name := findTarget(s, st)
+					mu.Lock()
+					targetIP, targetName = ip, name
+					if ip == "" {
+						lastError = "Aucun PC trouvé"
+					} else {
+						lastError = ""
+					}
+					mu.Unlock()
+					if ip != "" {
+						addLog("PC trouvé : " + name)
+					}
+				}
+			}
+		}
+
+		mu.Lock()
 		ready := st.BackendState == "Running" && targetIP != ""
+		forwarding = ready && forwardersUp
 		mu.Unlock()
 
 		if ready && !forwardersUp {
-			if err := startForwarders(s, portStart, portEnd); err != nil {
+			if err := startForwarders(s, relayPorts); err != nil {
 				setError(err)
 			} else {
 				forwardersUp = true
 				mu.Lock()
 				forwarding = true
 				mu.Unlock()
-				addLog(fmt.Sprintf("relais 127.0.0.1:%d-%d -> %s", portStart, portEnd, targetIP))
+				addLog("relais actif")
 			}
 		}
 		time.Sleep(2 * time.Second)
 	}
 }
 
-func findPeer(st *ipnstate.Status, name string) string {
-	name = strings.ToLower(name)
+func peerOnline(st *ipnstate.Status, ip string) bool {
 	for _, p := range st.Peer {
-		host := strings.ToLower(p.HostName)
-		dns := strings.ToLower(p.DNSName)
-		if host == name || strings.HasPrefix(dns, name+".") {
-			for _, ip := range p.TailscaleIPs {
-				if ip.Is4() {
-					return ip.String()
-				}
+		for _, a := range p.TailscaleIPs {
+			if a.String() == ip {
+				return p.Online
 			}
 		}
 	}
-	return ""
+	return false
+}
+
+// The PC: preferred name first if given, then any online computer (not a phone or tablet) of
+// the account that answers on a Sunshine HTTP port.
+func findTarget(s *tsnet.Server, st *ipnstate.Status) (string, string) {
+	type cand struct{ ip, name string }
+	var first, rest []cand
+	for _, p := range st.Peer {
+		if !p.Online {
+			continue
+		}
+		osName := strings.ToLower(p.OS)
+		if osName == "ios" || osName == "android" {
+			continue
+		}
+		ip := ""
+		for _, a := range p.TailscaleIPs {
+			if a.Is4() {
+				ip = a.String()
+			}
+		}
+		if ip == "" {
+			continue
+		}
+		c := cand{ip, p.HostName}
+		mu.Lock()
+		pref := strings.ToLower(preferred)
+		mu.Unlock()
+		if pref != "" && strings.ToLower(p.HostName) == pref {
+			first = append(first, c)
+		} else {
+			rest = append(rest, c)
+		}
+	}
+	for _, c := range append(first, rest...) {
+		for _, port := range []int{48989, 47989} {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			conn, err := s.Dial(ctx, "tcp", net.JoinHostPort(c.ip, strconv.Itoa(port)))
+			cancel()
+			if err == nil {
+				conn.Close()
+				return c.ip, c.name
+			}
+		}
+	}
+	return "", ""
 }
 
 func currentTarget(port int) string {
@@ -257,8 +383,8 @@ func currentTarget(port int) string {
 	return net.JoinHostPort(targetIP, strconv.Itoa(port))
 }
 
-func startForwarders(s *tsnet.Server, portStart, portEnd int) error {
-	for port := portStart; port <= portEnd; port++ {
+func startForwarders(s *tsnet.Server, ports []int) error {
+	for _, port := range ports {
 		ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
 		if err != nil {
 			return fmt.Errorf("port TCP %d : %w", port, err)

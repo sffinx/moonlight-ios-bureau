@@ -16,3 +16,6 @@ char *MBTailscaleStatus(void);
 
 // Fresh login link (empty if already connected). Blocks up to 15 s. Free with free().
 char *MBTailscaleLogin(void);
+
+// Signs this device out of Tailscale. Blocks up to 10 s.
+void MBTailscaleLogout(void);
