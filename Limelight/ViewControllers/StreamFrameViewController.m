@@ -76,6 +76,7 @@ static NSString *const BUREAU_DATA_KEY = @"MoonlightBureauDataUsage";
     BOOL _bureauCursorKnown;
     CGPoint _bureauZoomAnchor;
     BOOL _bureauZoomAnchored;
+    CGFloat _bureauKeyboardOverlap; // height of the desktop hidden by the keyboard (+ composer)
     UIButton *_bureauRotationButton;
 #endif
 }
@@ -272,11 +273,21 @@ static NSString *const BUREAU_DATA_KEY = @"MoonlightBureauDataUsage";
 // - pinch-zoom uses the cursor as pivot, then re-centers on it.
 // Finger movement is already divided by the zoom (StreamView points), as in CRD.
 - (void)bureauCenterOnCursor {
-    if (_scrollView == nil || !_bureauCursorKnown || _scrollView.zoomScale <= 1.01f) {
+    if (_scrollView == nil || !_bureauCursorKnown) {
+        return;
+    }
+    // Unzoomed and no keyboard: the whole desktop is on screen, nothing to follow
+    if (_scrollView.zoomScale <= 1.01f && _bureauKeyboardOverlap <= 0) {
+        if (_scrollView.contentOffset.x != 0 || _scrollView.contentOffset.y != 0) {
+            [_scrollView setContentOffset:CGPointZero animated:NO];
+        }
         return;
     }
     CGPoint p = [_streamView convertPoint:_bureauCursor toView:_scrollView];
     CGSize visible = _scrollView.bounds.size;
+    // With the keyboard up, only the part above it is visible: the desktop slides up
+    // with the cursor (like Chrome Remote Desktop) and can go up to the keyboard's height
+    visible.height = MAX(visible.height - _bureauKeyboardOverlap, 1);
     CGFloat x = MIN(MAX(p.x - visible.width / 2, 0), MAX(_scrollView.contentSize.width - visible.width, 0));
     CGFloat y = MIN(MAX(p.y - visible.height / 2, 0), MAX(_scrollView.contentSize.height - visible.height, 0));
     if (x != _scrollView.contentOffset.x || y != _scrollView.contentOffset.y) {
@@ -857,6 +868,32 @@ static NSString *const BUREAU_ORIENTATION_LOCK_KEY = @"MoonlightBureauOrientatio
     [super viewDidLayoutSubviews];
     [self bureauFitStreamView];
     [self bureauLayoutGrid];
+    [self bureauUpdateKeyboardOverlap];
+}
+
+// Part of the screen covered by the iOS keyboard and, when shown, the composer above it.
+// keyboardLayoutGuide follows the keyboard (its height is the bottom safe area when hidden).
+- (void)bureauUpdateKeyboardOverlap {
+    if (_scrollView == nil || _settings.absoluteTouchMode) {
+        return;
+    }
+    UILayoutGuide *guide = self.view.keyboardLayoutGuide;
+    CGFloat overlap = 0;
+    if (guide.layoutFrame.size.height > self.view.safeAreaInsets.bottom + 1) {
+        CGFloat top = guide.layoutFrame.origin.y;
+        if (_bureauComposer != nil && !_bureauComposer.hidden) {
+            top = MIN(top, _bureauComposer.frame.origin.y);
+        }
+        overlap = MAX(0, CGRectGetMaxY([_scrollView convertRect:_scrollView.bounds toView:self.view]) - top);
+    }
+    if (fabs(overlap - _bureauKeyboardOverlap) < 0.5) {
+        return;
+    }
+    _bureauKeyboardOverlap = overlap;
+    UIEdgeInsets insets = _scrollView.contentInset;
+    insets.bottom = overlap;
+    _scrollView.contentInset = insets;
+    [self bureauCenterOnCursor];
 }
 
 // Stream view = whole screen at zoom 1 (the scroll view was sized once at creation)
@@ -1233,6 +1270,9 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
     _bureauTextView.scrollEnabled = YES;
     _bureauTextView.textContainerInset = UIEdgeInsetsMake(8, 0, 8, 0);
     _bureauTextView.delegate = (id<UITextViewDelegate>)self;
+    if (@available(iOS 17.0, *)) {
+        _bureauTextView.inlinePredictionType = UITextInlinePredictionTypeNo;
+    }
     _bureauPlaceholder = [[UILabel alloc] init];
     _bureauPlaceholder.text = @"Envoyer du texte (Retour = nouvelle ligne)";
     _bureauPlaceholder.textColor = [UIColor colorWithWhite:1 alpha:0.4];
@@ -1383,11 +1423,13 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
     _bureauComposer.hidden = NO;
     [self.view bringSubviewToFront:_bureauComposer];
     [_bureauTextView becomeFirstResponder];
+    [self.view setNeedsLayout];
 }
 
 - (void)bureauHideComposer {
     [_bureauTextView resignFirstResponder];
     _bureauComposer.hidden = YES;
+    [self.view setNeedsLayout];
 }
 
 // Keyboard closed by any means (swipe, other app...): hide the composer too
@@ -1404,8 +1446,13 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
 }
 
 - (void)bureauTakeComposedText:(void (^)(NSString *text))handler {
+    // A word still being composed (marked text) is committed first
+    [_bureauTextView unmarkText];
     NSString *text = _bureauTextView.text ?: @"";
+    // Tell the keyboard the text changed, so its suggestions do not refer to the old text
+    [_bureauTextView.inputDelegate textWillChange:_bureauTextView];
     _bureauTextView.text = @"";
+    [_bureauTextView.inputDelegate textDidChange:_bureauTextView];
     _bureauPlaceholder.hidden = NO;
     handler(text);
 }

@@ -26,7 +26,11 @@ static NSString* DB_NAME = @"Limelight_iOS.sqlite";
 #if !TARGET_OS_TV
     UIApplicationShortcutItem* shortcut = [launchOptions valueForKey:UIApplicationLaunchOptionsShortcutItemKey];
     if (shortcut != nil) {
-        _pcUuidToLoad = (NSString*)[shortcut.userInfo objectForKey:@"UUID"];
+        // Static "Bureau du PC" action (Info.plist) has no UUID: last PC used
+        _pcUuidToLoad = (NSString*)[shortcut.userInfo objectForKey:@"UUID"] ?: @"*";
+        // Apple: returning NO when launched from a quick action keeps UIKit from also
+        // calling performActionForShortcutItem for the same action
+        return NO;
     }
 #endif
     return YES;
@@ -34,7 +38,7 @@ static NSString* DB_NAME = @"Limelight_iOS.sqlite";
 
 #if !TARGET_OS_TV
 - (void)application:(UIApplication *)application performActionForShortcutItem:(UIApplicationShortcutItem *)shortcutItem completionHandler:(void (^)(BOOL succeeded))completionHandler {
-    _pcUuidToLoad = (NSString*)[shortcutItem.userInfo objectForKey:@"UUID"];
+    _pcUuidToLoad = (NSString*)[shortcutItem.userInfo objectForKey:@"UUID"] ?: @"*";
     _shortcutCompletionHandler = completionHandler;
 }
 #endif

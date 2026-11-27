@@ -613,6 +613,9 @@ static NSMutableSet* hostList;
 }
 
 - (void) prepareToStreamApp:(TemporaryApp *)app {
+    if (app.host.uuid != nil) {
+        [[NSUserDefaults standardUserDefaults] setObject:app.host.uuid forKey:@"MoonlightBureauLastHost"];
+    }
     _streamConfig = [[StreamConfiguration alloc] init];
     _streamConfig.host = app.host.activeAddress;
     _streamConfig.httpsPort = app.host.httpsPort;
@@ -1063,10 +1066,25 @@ static NSMutableSet* hostList;
     if (delegate.pcUuidToLoad != nil) {
         // Find the host it corresponds to
         TemporaryHost* matchingHost = nil;
-        for (TemporaryHost* host in hostList) {
-            if ([host.uuid isEqualToString:delegate.pcUuidToLoad]) {
-                matchingHost = host;
-                break;
+        NSString* wanted = delegate.pcUuidToLoad;
+        if ([wanted isEqualToString:@"*"]) {
+            // "Bureau du PC": last PC streamed from, otherwise the first paired one
+            wanted = [[NSUserDefaults standardUserDefaults] stringForKey:@"MoonlightBureauLastHost"];
+        }
+        @synchronized (hostList) {
+            for (TemporaryHost* host in hostList) {
+                if (wanted != nil && [host.uuid isEqualToString:wanted]) {
+                    matchingHost = host;
+                    break;
+                }
+            }
+            if (matchingHost == nil && [delegate.pcUuidToLoad isEqualToString:@"*"]) {
+                for (TemporaryHost* host in hostList) {
+                    if (host.pairState == PairStatePaired || host.appList.count > 0) {
+                        matchingHost = host;
+                        break;
+                    }
+                }
             }
         }
         
@@ -1309,6 +1327,9 @@ static NSString *const BUREAU_RESUME_KEY = @"MoonlightBureauResumeAt";
         }
     }
     
+    if (quickActions.count < 2) {
+        [quickActions removeAllObjects];
+    }
     [UIApplication sharedApplication].shortcutItems = quickActions;
 #endif
 }

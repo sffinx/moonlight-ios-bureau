@@ -60,6 +60,19 @@
 	<string>Moonlight uses the local network to connect to your gaming PC for streaming.</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>UIApplicationShortcutItems</key>
+	<array>
+		<dict>
+			<key>UIApplicationShortcutItemType</key>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER).bureau</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>Bureau du PC</string>
+			<key>UIApplicationShortcutItemSubtitle</key>
+			<string>Connexion directe</string>
+			<key>UIApplicationShortcutItemIconSymbolName</key>
+			<string>desktopcomputer</string>
+		</dict>
+	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>Launch Screen</string>
 	<key>UIMainStoryboardFile</key>
