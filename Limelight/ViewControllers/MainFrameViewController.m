@@ -63,6 +63,7 @@
     UIBarButtonItem* _bureauTailscaleItem;
     NSDictionary* _bureauTailscale;
     BOOL _bureauTailscaleLoginShown;
+    BOOL _bureauTailscaleWasForwarding;
 #endif
 #if !TARGET_OS_TV
     CAGradientLayer* _bureauBackground;
@@ -1161,7 +1162,23 @@ static NSMutableSet* hostList;
 
     if (forwarding) {
         [self bureauUseRelayAddress];
+        if (!_bureauTailscaleWasForwarding) {
+            // Relay just came up (login done, app restarted): look for the PCs again right
+            // away, otherwise the phone PC stayed "Hors ligne" until the app was reopened
+            Log(LOG_I, @"Moonlight Bureau: Tailscale relay up, refreshing PCs");
+            [_discMan stopDiscovery];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (!self->_background) {
+                    [self->_discMan resetDiscoveryState];
+                    [self->_discMan startDiscovery];
+                    if (self->_selectedHost != nil && self->_selectedHost.pairState == PairStatePaired) {
+                        [self hostClicked:self->_selectedHost view:nil];
+                    }
+                }
+            });
+        }
     }
+    _bureauTailscaleWasForwarding = forwarding;
     // First launch: ask once for the Tailscale login (then it is remembered)
     if ([state isEqualToString:@"NeedsLogin"] && authURL.length > 0 && !_bureauTailscaleLoginShown &&
         self.navigationController.topViewController == self && self.presentedViewController == nil &&
@@ -1200,10 +1217,7 @@ static NSMutableSet* hostList;
 - (void)bureauOpenFreshTailscaleLogin {
     // A few seconds while Tailscale prepares the link: say so, with a spinner
     UIAlertController *wait = [UIAlertController alertControllerWithTitle:@"Préparation de la connexion…"
-                                                                  message:@"Tailscale prépare la page de connexion (quelques secondes).
-
-
-"
+                                                                  message:@"Tailscale prépare la page de connexion (quelques secondes).\n\n\n"
                                                            preferredStyle:UIAlertControllerStyleAlert];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
     spinner.translatesAutoresizingMaskIntoConstraints = NO;
