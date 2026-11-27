@@ -7,6 +7,7 @@
 //
 
 #import "SettingsViewController.h"
+#import "SWRevealViewController.h"
 #import <objc/runtime.h>
 #import "TemporarySettings.h"
 #import "DataManager.h"
@@ -548,9 +549,7 @@ BOOL isCustomResolution(CGSize res) {
         [self updateResolutionDisplayViewText];
         self->_lastSelectedResolutionIndex = [self.resolutionSelector selectedSegmentIndex];
         
-        UIAlertController *alertController = [UIAlertController alertControllerWithTitle:@"Définition personnalisée" message: @"Le PC ne change pas sa définition pour une définition personnalisée : à régler sur le PC.
-
-Une définition que le PC ou le téléphone ne gère pas peut provoquer des erreurs." preferredStyle:UIAlertControllerStyleAlert];
+        UIAlertController *alertController = [UIAlertController alertControllerWithTitle:@"Définition personnalisée" message: @"Le PC ne change pas sa définition pour une définition personnalisée : à régler sur le PC.\n\nUne définition que le PC ou le téléphone ne gère pas peut provoquer des erreurs." preferredStyle:UIAlertControllerStyleAlert];
         [alertController addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
         [self presentViewController:alertController animated:YES completion:nil];
     }]];
