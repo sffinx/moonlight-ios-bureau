@@ -68,6 +68,10 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
     CGFloat _bureauWheelStartZoom;
     CGPoint _bureauWheelTravel;
     int _bureauWheelMode; // 0 = undecided, 1 = scroll, 2 = zoom
+    CADisplayLink *_bureauWheelFling;
+    CGPoint _bureauWheelVelocity;   // screen points per second, after the fingers lift
+    CFTimeInterval _bureauWheelLastTick;
+    CGPoint _bureauWheelRemainder;  // sub-unit wheel amounts carried to the next event
     UIButton *_bureauMuteButton;
     NSTimer *_bureauDataTimer;
     NSMutableDictionary<NSString *, NSNumber *> *_bureauIfLast; // last counter per interface
@@ -364,6 +368,7 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
 #if !TARGET_OS_TV
         [_bureauDataTimer invalidate];
         _bureauDataTimer = nil;
+        [self bureauStopWheelFling];
         [self bureauFlushDataUsage];
 #endif
         [_controllerSupport cleanup];
@@ -1190,7 +1195,12 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
     wheel.delaysTouchesEnded = NO;
     wheel.delegate = (id<UIGestureRecognizerDelegate>)self;
     if (!_settings.absoluteTouchMode) {
-        [_streamView addGestureRecognizer:wheel];
+        // A UIView created in code accepts a single finger by default (multipleTouchEnabled = NO):
+        // the second finger never reached the stream view, so neither this wheel nor the old
+        // two-finger scroll could work. The recognizer sits on the scroll view (multi-touch).
+        _streamView.multipleTouchEnabled = YES;
+        _scrollView.multipleTouchEnabled = YES;
+        [(_scrollView ?: _streamView) addGestureRecognizer:wheel];
     }
 
     [self setupBureauComposer];
@@ -1355,18 +1365,73 @@ static CGFloat BureauTouchDistance(UIGestureRecognizer *g) {
     return hypot(a.x - b.x, a.y - b.y);
 }
 
+// Like Chrome Remote Desktop (remoting/client/ui/gesture_interpreter.cc): the finger movement
+// is mapped to the desktop (divided by the zoom) and sent as wheel; after the fingers lift,
+// the scroll goes on with a fling that slows down exponentially (time constant 250 ms).
+static const CGFloat BUREAU_WHEEL_PER_POINT = 10;       // 120 = one notch every 12 points
+static const CFTimeInterval BUREAU_SCROLL_FLING_T = 0.25;
+static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
+
+- (void)bureauSendWheel:(CGPoint)screenDelta {
+    CGFloat zoom = MAX(_scrollView.zoomScale, 1);
+    CGFloat dy = screenDelta.y / zoom * BUREAU_WHEEL_PER_POINT + _bureauWheelRemainder.y;
+    CGFloat dx = -screenDelta.x / zoom * BUREAU_WHEEL_PER_POINT + _bureauWheelRemainder.x;
+    short vertical = (short)MAX(MIN(trunc(dy), 32767), -32767);
+    short horizontal = (short)MAX(MIN(trunc(dx), 32767), -32767);
+    _bureauWheelRemainder = CGPointMake(dx - horizontal, dy - vertical);
+    if (vertical != 0) {
+        LiSendHighResScrollEvent(vertical);
+    }
+    if (horizontal != 0) {
+        LiSendHighResHScrollEvent(horizontal);
+    }
+}
+
+- (void)bureauStopWheelFling {
+    [_bureauWheelFling invalidate];
+    _bureauWheelFling = nil;
+}
+
+- (void)bureauWheelFlingTick:(CADisplayLink *)link {
+    CFTimeInterval now = link.timestamp;
+    CFTimeInterval dt = MIN(now - _bureauWheelLastTick, 0.05);
+    _bureauWheelLastTick = now;
+    CGFloat decay = exp(-dt / BUREAU_SCROLL_FLING_T);
+    // Distance covered during dt by v(t) = v0 * e^(-t/T)
+    CGPoint step = CGPointMake(_bureauWheelVelocity.x * BUREAU_SCROLL_FLING_T * (1 - decay),
+                               _bureauWheelVelocity.y * BUREAU_SCROLL_FLING_T * (1 - decay));
+    _bureauWheelVelocity = CGPointMake(_bureauWheelVelocity.x * decay, _bureauWheelVelocity.y * decay);
+    [self bureauSendWheel:step];
+    if (hypot(_bureauWheelVelocity.x, _bureauWheelVelocity.y) < BUREAU_SCROLL_FLING_MIN) {
+        [self bureauStopWheelFling];
+    }
+}
+
 - (void)bureauWheel:(UIPanGestureRecognizer *)pan {
     if (pan.state == UIGestureRecognizerStateBegan) {
+        [self bureauStopWheelFling];
         _bureauWheelMode = 0;
         _bureauWheelStartDistance = BureauTouchDistance(pan);
         _bureauWheelStartZoom = _scrollView.zoomScale;
         _bureauWheelTravel = CGPointZero;
+        _bureauWheelRemainder = CGPointZero;
         [pan setTranslation:CGPointZero inView:nil];
         return;
     }
     if (pan.state != UIGestureRecognizerStateChanged) {
         if (_bureauWheelMode == 1) {
             _scrollView.pinchGestureRecognizer.enabled = YES;
+            if (pan.state == UIGestureRecognizerStateEnded) {
+                CGPoint v = [pan velocityInView:nil];
+                // Keep only the main direction, like the wheel itself
+                v = fabs(v.y) >= fabs(v.x) ? CGPointMake(0, v.y) : CGPointMake(v.x, 0);
+                if (hypot(v.x, v.y) > BUREAU_SCROLL_FLING_MIN * 4) {
+                    _bureauWheelVelocity = v;
+                    _bureauWheelFling = [CADisplayLink displayLinkWithTarget:self selector:@selector(bureauWheelFlingTick:)];
+                    _bureauWheelLastTick = CACurrentMediaTime();
+                    [_bureauWheelFling addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+                }
+            }
         }
         _bureauWheelMode = 0;
         return;
@@ -1381,7 +1446,7 @@ static CGFloat BureauTouchDistance(UIGestureRecognizer *g) {
         CGFloat spread = fabs(BureauTouchDistance(pan) - _bureauWheelStartDistance);
         if (spread > 24 && spread > travel) {
             _bureauWheelMode = 2; // fingers move apart/together: zoom, handled by the scroll view
-        } else if (travel > 10 && travel > spread * 2) {
+        } else if (travel > 8 && travel > spread * 1.5) {
             // Fingers move together: wheel. Stop the pinch and undo its small zoom.
             _bureauWheelMode = 1;
             _scrollView.pinchGestureRecognizer.enabled = NO;
@@ -1397,18 +1462,8 @@ static CGFloat BureauTouchDistance(UIGestureRecognizer *g) {
     if (_bureauWheelMode != 1) {
         return;
     }
-    // Content follows the fingers, like scrolling on iOS (120 = one wheel notch per ~12 points)
-    if (fabs(t.y) >= fabs(t.x)) {
-        short vertical = (short)MAX(MIN(t.y * 10, 32767), -32767);
-        if (vertical != 0) {
-            LiSendHighResScrollEvent(vertical);
-        }
-    } else {
-        short horizontal = (short)MAX(MIN(-t.x * 10, 32767), -32767);
-        if (horizontal != 0) {
-            LiSendHighResHScrollEvent(horizontal);
-        }
-    }
+    // Main direction only, so a vertical scroll does not drift sideways
+    [self bureauSendWheel:(fabs(t.y) >= fabs(t.x) ? CGPointMake(0, t.y) : CGPointMake(t.x, 0))];
 }
 
 - (void)setupBureauComposer {
