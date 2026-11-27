@@ -89,6 +89,8 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
     BOOL _bureauInBackground;
     NSDate *_bureauForegroundAt;
     CGFloat _bureauKeyboardOverlap; // height of the desktop hidden by the keyboard (+ composer)
+    BOOL _bureauKeyboardShown;
+    CGRect _bureauKeyboardFrame;    // in self.view coordinates, from the keyboard notifications
     UIButton *_bureauRotationButton;
 #endif
 }
@@ -983,16 +985,30 @@ static NSString *const BUREAU_ORIENTATION_LOCK_KEY = @"MoonlightBureauOrientatio
     [self bureauUpdateKeyboardOverlap];
 }
 
-// Part of the screen covered by the iOS keyboard and, when shown, the composer above it.
-// keyboardLayoutGuide follows the keyboard (its height is the bottom safe area when hidden).
+- (void)bureauKeyboardChanged:(NSNotification *)notification {
+    CGRect screenFrame = [notification.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
+    UIScreen *screen = self.view.window.screen ?: UIScreen.mainScreen;
+    CGRect frame = [self.view convertRect:screenFrame fromCoordinateSpace:screen.coordinateSpace];
+    // Shown = on screen with a real height (an undocked/floating or hidden keyboard does not count)
+    _bureauKeyboardShown = frame.size.height > 60 && CGRectGetMinY(frame) < self.view.bounds.size.height - 1
+                           && CGRectGetMaxY(frame) >= self.view.bounds.size.height - 1;
+    _bureauKeyboardFrame = frame;
+    [self bureauUpdateKeyboardOverlap];
+}
+
+- (void)bureauKeyboardHidden:(NSNotification *)notification {
+    _bureauKeyboardShown = NO;
+    [self bureauUpdateKeyboardOverlap];
+}
+
+// Part of the screen covered by the iOS keyboard and, when shown, the composer above it
 - (void)bureauUpdateKeyboardOverlap {
     if (_scrollView == nil || _settings.absoluteTouchMode) {
         return;
     }
-    UILayoutGuide *guide = self.view.keyboardLayoutGuide;
     CGFloat overlap = 0;
-    if (guide.layoutFrame.size.height > self.view.safeAreaInsets.bottom + 1) {
-        CGFloat top = guide.layoutFrame.origin.y;
+    if (_bureauKeyboardShown) {
+        CGFloat top = CGRectGetMinY(_bureauKeyboardFrame);
         if (_bureauComposer != nil && !_bureauComposer.hidden) {
             top = MIN(top, _bureauComposer.frame.origin.y);
         }
@@ -1216,6 +1232,13 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
     wheel.delegate = (id<UIGestureRecognizerDelegate>)self;
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(bureauTouchBegan:)
                                                  name:@"MoonlightBureauTouchBegan" object:nil];
+    // Keyboard position from iOS's own notifications (Apple: UIKeyboardWillChangeFrame /
+    // UIKeyboardWillHide). keyboardLayoutGuide kept a height without any keyboard (home bar,
+    // notch), so the desktop moved up with an empty strip and followed the mouse.
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(bureauKeyboardChanged:)
+                                                 name:UIKeyboardWillChangeFrameNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(bureauKeyboardHidden:)
+                                                 name:UIKeyboardWillHideNotification object:nil];
     if (!_settings.absoluteTouchMode) {
         // A UIView created in code accepts a single finger by default (multipleTouchEnabled = NO):
         // the second finger never reached the stream view, so neither this wheel nor the old
