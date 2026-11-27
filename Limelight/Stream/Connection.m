@@ -16,6 +16,18 @@
 
 #include "Limelight.h"
 #include "opus_multistream.h"
+#include <stdatomic.h>
+
+static atomic_bool bureauAudioMuted;
+static _Atomic unsigned long long bureauReceivedBytes;
+
+void BureauSetAudioMuted(bool muted) {
+    atomic_store(&bureauAudioMuted, muted);
+}
+
+unsigned long long BureauTakeReceivedBytes(void) {
+    return atomic_exchange(&bureauReceivedBytes, 0);
+}
 
 @implementation Connection {
     SERVER_INFORMATION _serverInfo;
@@ -133,6 +145,7 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit)
 {
     int offset = 0;
     int ret;
+    atomic_fetch_add(&bureauReceivedBytes, (unsigned long long)decodeUnit->fullLength);
     unsigned char* data = (unsigned char*) malloc(decodeUnit->fullLength);
     if (data == NULL) {
         // A frame was lost due to OOM condition
@@ -283,6 +296,12 @@ void ArCleanup(void)
 void ArDecodeAndPlaySample(char* sampleData, int sampleLength)
 {
     int decodeLen;
+
+    atomic_fetch_add(&bureauReceivedBytes, (unsigned long long)sampleLength);
+    // Moonlight Bureau: muted on the phone, the sample is dropped (the PC is not affected)
+    if (atomic_load(&bureauAudioMuted)) {
+        return;
+    }
     
     // Don't queue if there's already more than 30 ms of audio data waiting
     // in Moonlight's audio queue.

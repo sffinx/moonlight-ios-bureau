@@ -262,9 +262,13 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
         CGPoint secondLocation = [[[[event allTouches] allObjects] objectAtIndex:1] locationInView:view];
         
         CGPoint avgLocation = CGPointMake((firstLocation.x + secondLocation.x) / 2, (firstLocation.y + secondLocation.y) / 2);
+#if TARGET_OS_TV
         if (touchLocation.y != avgLocation.y) {
             LiSendHighResScrollEvent((avgLocation.y - touchLocation.y) * 10);
         }
+#endif
+        // Moonlight Bureau (iOS): the wheel is sent by StreamFrameViewController (bureauWheel:),
+        // measured on screen so it does not depend on the zoom.
 
         // If we've moved far enough to confirm this wasn't just human/machine error,
         // mark it as such.

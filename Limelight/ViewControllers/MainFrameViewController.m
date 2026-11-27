@@ -53,6 +53,8 @@
     NSArray* _sortedAppList;
     NSCache* _boxArtCache;
     bool _background;
+    // Moonlight Bureau: launch the PC's app as soon as its list is known (shortcut, resume)
+    NSDate* _bureauAutoLaunchUntil;
 #if TARGET_OS_TV
     UITapGestureRecognizer* _menuRecognizer;
 #endif
@@ -210,7 +212,9 @@ static NSMutableSet* hostList;
                 [self updateAppsForHost:host];
                 [self->_appManager stopRetrieving];
                 [self->_appManager retrieveAssetsFromHost:host];
-                [self hideLoadingFrame: nil];
+                [self hideLoadingFrame: ^{
+                    [self bureauAutoLaunchIfPending:host];
+                }];
             });
         }
     });
@@ -1075,16 +1079,75 @@ static NSMutableSet* hostList;
             delegate.shortcutCompletionHandler = nil;
         }
         
-        if (matchingHost != nil && _selectedHost != matchingHost) {
-            // Navigate to the host page
+        // Moonlight Bureau: the home-screen shortcut connects straight to the PC
+        // (running app, otherwise "Desktop"), instead of only opening its app list
+        if (matchingHost != nil) {
+            _bureauAutoLaunchUntil = [NSDate dateWithTimeIntervalSinceNow:60];
             [self hostClicked:matchingHost view:nil];
         }
     }
 }
 
+#pragma mark Moonlight Bureau: direct launch and resume
+
+static NSString *const BUREAU_RESUME_KEY = @"MoonlightBureauResumeAt";
+
+// Set by the stream screen when iOS sends the app to the background mid-session
++ (void)bureauRequestResume {
+    [[NSUserDefaults standardUserDefaults] setObject:[NSDate date] forKey:BUREAU_RESUME_KEY];
+}
+
+// Consumes the resume request when the app is in front again. The PC keeps its session
+// open, so coming back within 30 minutes reconnects to it without going through the menu.
+- (BOOL)bureauTakeResumeRequest {
+    if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
+        return NO;
+    }
+    NSDate *at = [[NSUserDefaults standardUserDefaults] objectForKey:BUREAU_RESUME_KEY];
+    if (at == nil) {
+        return NO;
+    }
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:BUREAU_RESUME_KEY];
+    if (-[at timeIntervalSinceNow] > 30 * 60 || _selectedHost == nil || _selectedHost.pairState != PairStatePaired) {
+        return NO;
+    }
+    _bureauAutoLaunchUntil = [NSDate dateWithTimeIntervalSinceNow:60];
+    return YES;
+}
+
+- (void)bureauAutoLaunchIfPending:(TemporaryHost *)host {
+    if (_bureauAutoLaunchUntil == nil || [_bureauAutoLaunchUntil timeIntervalSinceNow] < 0 || host != _selectedHost) {
+        _bureauAutoLaunchUntil = nil;
+        return;
+    }
+    _bureauAutoLaunchUntil = nil;
+    if (self.navigationController.topViewController != self || self.presentedViewController != nil) {
+        return;
+    }
+    TemporaryApp *app = [self findRunningApp:host];
+    if (app == nil) {
+        for (TemporaryApp *candidate in host.appList) {
+            if ([candidate.name caseInsensitiveCompare:@"Desktop"] == NSOrderedSame) {
+                app = candidate;
+                break;
+            }
+        }
+    }
+    if (app == nil) {
+        app = _sortedAppList.firstObject;
+    }
+    if (app == nil) {
+        return;
+    }
+    Log(LOG_I, @"Moonlight Bureau: direct launch of %@", app.name);
+    [self prepareToStreamApp:app];
+    [self performSegueWithIdentifier:@"createStreamFrame" sender:nil];
+}
+
 -(void)handleReturnToForeground
 {
     _background = NO;
+    [self bureauTakeResumeRequest];
     
     [self beginForegroundRefresh];
     
@@ -1134,6 +1197,11 @@ static NSMutableSet* hostList;
     
     // Check for a pending shortcut action when appearing
     [self handlePendingShortcutAction];
+
+    // Moonlight Bureau: back from the background after the stream was cut by iOS
+    if ([self bureauTakeResumeRequest]) {
+        [self hostClicked:_selectedHost view:nil];
+    }
     
     [[NSNotificationCenter defaultCenter] addObserver: self
                                              selector: @selector(handleReturnToForeground)
@@ -1233,7 +1301,7 @@ static NSMutableSet* hostList;
                 UIApplicationShortcutItem* shortcut = [[UIApplicationShortcutItem alloc]
                                                        initWithType:@"PC"
                                                        localizedTitle:host.name
-                                                       localizedSubtitle:nil
+                                                       localizedSubtitle:@"Connexion directe"
                                                        icon:[UIApplicationShortcutIcon iconWithType:UIApplicationShortcutIconTypePlay]
                                                        userInfo:[NSDictionary dictionaryWithObject:host.uuid forKey:@"UUID"]];
                 [quickActions addObject: shortcut];

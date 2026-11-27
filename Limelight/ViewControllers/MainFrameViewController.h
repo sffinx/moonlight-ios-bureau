@@ -22,4 +22,9 @@
 @property (weak, nonatomic) IBOutlet UIBarButtonItem *upButton;
 #endif
 
+#if !TARGET_OS_TV
+// Moonlight Bureau: reconnect when the app comes back from the background
++ (void)bureauRequestResume;
+#endif
+
 @end

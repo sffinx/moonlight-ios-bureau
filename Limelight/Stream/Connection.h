@@ -23,6 +23,11 @@ typedef struct {
     int minHostProcessingLatency;
 } video_stats_t;
 
+// Moonlight Bureau: phone-side mute (the PC keeps its sound) and received-data counter
+// (video + audio payloads, without network overhead).
+void BureauSetAudioMuted(bool muted);
+unsigned long long BureauTakeReceivedBytes(void);
+
 @interface Connection : NSOperation <NSStreamDelegate>
 
 -(id) initWithConfig:(StreamConfiguration*)config renderer:(VideoDecoderRenderer*)myRenderer connectionCallbacks:(id<ConnectionCallbacks>)callbacks;
