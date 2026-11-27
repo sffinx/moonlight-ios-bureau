@@ -13,9 +13,12 @@
 #import "ControllerSupport.h"
 #import "DataManager.h"
 #import "Connection.h"
+#include <ifaddrs.h>
+#include <net/if.h>
 
 static NSString *const BUREAU_MUTED_KEY = @"MoonlightBureauMuted";
-static NSString *const BUREAU_DATA_KEY = @"MoonlightBureauDataUsage";
+static NSString *const BUREAU_DATA_KEY = @"MoonlightBureauDataUsage2";
+static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -66,6 +69,8 @@ static NSString *const BUREAU_DATA_KEY = @"MoonlightBureauDataUsage";
     UIButton *_bureauMuteButton;
     NSTimer *_bureauDataTimer;
     CGFloat _bureauGridWidth;
+    NSMutableDictionary<NSString *, NSNumber *> *_bureauIfLast; // last counter per interface
+    UIButton *_bureauDataButton;
     UIButton *_bureauPinButton;
     UIView *_bureauComposer;
     UITextView *_bureauTextView;
@@ -974,9 +979,17 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
     _bureauDataLabel.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightMedium];
     _bureauDataLabel.textColor = [UIColor colorWithWhite:1 alpha:0.65];
     _bureauDataLabel.numberOfLines = 0;
-    UIStackView *header = [[UIStackView alloc] initWithArrangedSubviews:@[title, _bureauDataLabel]];
+    _bureauDataButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    _bureauDataButton.accessibilityLabel = @"Afficher les données consommées";
+    [_bureauDataButton addTarget:self action:@selector(bureauToggleDataShown) forControlEvents:UIControlEventTouchUpInside];
+    [_bureauDataButton setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    UIStackView *titleRow = [[UIStackView alloc] initWithArrangedSubviews:@[title, _bureauDataButton]];
+    titleRow.axis = UILayoutConstraintAxisHorizontal;
+    titleRow.alignment = UIStackViewAlignmentCenter;
+    UIStackView *header = [[UIStackView alloc] initWithArrangedSubviews:@[titleRow, _bureauDataLabel]];
     header.axis = UILayoutConstraintAxisVertical;
     header.spacing = 2;
+    [self bureauRefreshDataShown];
 
     // Main actions, as tiles (icon + label)
     _bureauPinButton = [self bureauTile:@"pin" title:@"Épingler" color:UIColor.systemGrayColor action:@selector(bureauTogglePin)];
@@ -1061,6 +1074,7 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
     [self bureauRefreshMuteTile];
 
     // Data counter: saved every 15 s and when the stream closes
+    [self bureauFlushDataUsage]; // first reading = starting point of this session
     _bureauDataTimer = [NSTimer scheduledTimerWithTimeInterval:15 target:self selector:@selector(bureauFlushDataUsage) userInfo:nil repeats:YES];
 
     // Two-finger drag = mouse wheel (vertical and horizontal), measured on screen
@@ -1182,17 +1196,63 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
 
 #pragma mark Data used
 
-// Received video + audio payloads, saved per hour (31 days kept). Network overhead and
-// error correction are not counted: an estimate, a few % under the real mobile data.
+// What the phone really exchanged on its network interfaces while a session is open:
+// cellular (pdp_ip*) and Wi-Fi (en*), received + sent, headers, error correction and
+// VPN included. Tunnels (utun*, Tailscale) are skipped, their traffic is already counted
+// on the real interface. Includes the little that other apps exchange during the session.
+// The system counters are 32-bit: read every 15 s, so they cannot wrap twice in between.
+- (void)bureauReadInterfaces:(unsigned long long *)cellular wifi:(unsigned long long *)wifi {
+    struct ifaddrs *list = NULL;
+    if (getifaddrs(&list) != 0) {
+        Log(LOG_W, @"Moonlight Bureau: getifaddrs failed (%d)", errno);
+        return;
+    }
+    if (_bureauIfLast == nil) {
+        _bureauIfLast = [NSMutableDictionary dictionary];
+    }
+    BOOL baseline = _bureauIfLast.count == 0;
+    for (struct ifaddrs *ifa = list; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_LINK || ifa->ifa_data == NULL) {
+            continue;
+        }
+        BOOL isCell = strncmp(ifa->ifa_name, "pdp_ip", 6) == 0;
+        BOOL isWifi = strncmp(ifa->ifa_name, "en", 2) == 0;
+        if (!isCell && !isWifi) {
+            continue;
+        }
+        const struct if_data *d = (const struct if_data *)ifa->ifa_data;
+        uint32_t now = d->ifi_ibytes + d->ifi_obytes; // wraps like the counters themselves
+        NSString *name = [NSString stringWithUTF8String:ifa->ifa_name];
+        NSNumber *last = _bureauIfLast[name];
+        _bureauIfLast[name] = @(now);
+        if (baseline || last == nil) {
+            continue;
+        }
+        uint32_t delta = now - (uint32_t)last.unsignedIntValue;
+        if (isCell) {
+            *cellular += delta;
+        } else {
+            *wifi += delta;
+        }
+    }
+    freeifaddrs(list);
+}
+
+// Saved per hour, 31 days kept: { hour: { "c": cellular, "w": wifi } }
 - (void)bureauFlushDataUsage {
-    unsigned long long bytes = BureauTakeReceivedBytes();
-    if (bytes == 0) {
+    unsigned long long cellular = 0, wifi = 0;
+    [self bureauReadInterfaces:&cellular wifi:&wifi];
+    if (cellular == 0 && wifi == 0) {
         return;
     }
     NSMutableDictionary *usage = [[[NSUserDefaults standardUserDefaults] dictionaryForKey:BUREAU_DATA_KEY] mutableCopy] ?: [NSMutableDictionary dictionary];
     long long hour = (long long)floor([[NSDate date] timeIntervalSince1970] / 3600);
     NSString *key = [NSString stringWithFormat:@"%lld", hour];
-    usage[key] = @([usage[key] unsignedLongLongValue] + bytes);
+    NSDictionary *old = usage[key];
+    usage[key] = @{
+        @"c": @([old[@"c"] unsignedLongLongValue] + cellular),
+        @"w": @([old[@"w"] unsignedLongLongValue] + wifi),
+    };
     for (NSString *k in usage.allKeys) {
         if (hour - [k longLongValue] > 31 * 24) {
             [usage removeObjectForKey:k];
@@ -1205,18 +1265,46 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
     [self bureauFlushDataUsage];
     NSDictionary *usage = [[NSUserDefaults standardUserDefaults] dictionaryForKey:BUREAU_DATA_KEY];
     long long hour = (long long)floor([[NSDate date] timeIntervalSince1970] / 3600);
-    unsigned long long day = 0, week = 0, month = 0;
+    unsigned long long cell[3] = {0, 0, 0}, wifi[3] = {0, 0, 0};
+    long long limits[3] = {24, 7 * 24, 30 * 24};
     for (NSString *k in usage) {
         long long age = hour - [k longLongValue];
-        unsigned long long v = [usage[k] unsignedLongLongValue];
-        if (age < 24) day += v;
-        if (age < 7 * 24) week += v;
-        if (age < 30 * 24) month += v;
+        for (int i = 0; i < 3; i++) {
+            if (age < limits[i]) {
+                cell[i] += [usage[k][@"c"] unsignedLongLongValue];
+                wifi[i] += [usage[k][@"w"] unsignedLongLongValue];
+            }
+        }
     }
     NSByteCountFormatter *f = [[NSByteCountFormatter alloc] init];
     f.countStyle = NSByteCountFormatterCountStyleDecimal;
-    return [NSString stringWithFormat:@"Données ≈  24 h : %@  ·  7 j : %@  ·  30 j : %@",
-            [f stringFromByteCount:(long long)day], [f stringFromByteCount:(long long)week], [f stringFromByteCount:(long long)month]];
+    return [NSString stringWithFormat:@"Réseau mobile  24 h : %@  ·  7 j : %@  ·  30 j : %@\nWi-Fi  24 h : %@  ·  7 j : %@  ·  30 j : %@",
+            [f stringFromByteCount:(long long)cell[0]], [f stringFromByteCount:(long long)cell[1]], [f stringFromByteCount:(long long)cell[2]],
+            [f stringFromByteCount:(long long)wifi[0]], [f stringFromByteCount:(long long)wifi[1]], [f stringFromByteCount:(long long)wifi[2]]];
+}
+
+// Shown only when chosen (button next to the title), remembered between sessions
+- (void)bureauToggleDataShown {
+    BOOL shown = ![[NSUserDefaults standardUserDefaults] boolForKey:BUREAU_SHOW_DATA_KEY];
+    [[NSUserDefaults standardUserDefaults] setBool:shown forKey:BUREAU_SHOW_DATA_KEY];
+    [self bureauRefreshDataShown];
+    [UIView animateWithDuration:0.15 animations:^{
+        [self.view layoutIfNeeded];
+    }];
+    [self bureauRestartHideTimer];
+}
+
+- (void)bureauRefreshDataShown {
+    BOOL shown = [[NSUserDefaults standardUserDefaults] boolForKey:BUREAU_SHOW_DATA_KEY];
+    _bureauDataLabel.hidden = !shown;
+    if (shown) {
+        _bureauDataLabel.text = [self bureauDataSummary];
+    }
+    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:14 weight:UIImageSymbolWeightSemibold];
+    [_bureauDataButton setImage:[UIImage systemImageNamed:(shown ? @"chart.bar.fill" : @"chart.bar") withConfiguration:config]
+                       forState:UIControlStateNormal];
+    _bureauDataButton.tintColor = shown ? UIColor.systemCyanColor : [UIColor colorWithWhite:1 alpha:0.5];
+    _bureauDataButton.accessibilityLabel = shown ? @"Masquer les données consommées" : @"Afficher les données consommées";
 }
 
 #pragma mark Two-finger wheel
@@ -1331,7 +1419,9 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
 
 - (void)bureauSetToolbarShown:(BOOL)shown {
     if (shown) {
-        _bureauDataLabel.text = [self bureauDataSummary];
+        if (!_bureauDataLabel.hidden) {
+            _bureauDataLabel.text = [self bureauDataSummary];
+        }
         [self bureauLayoutGrid];
     }
     _bureauBar.hidden = !shown;
