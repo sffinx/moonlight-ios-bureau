@@ -92,6 +92,12 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
 - (void)viewDidAppear:(BOOL)animated
 {
     [super viewDidAppear:animated];
+#if !TARGET_OS_TV
+    [self.navigationController setNeedsUpdateOfScreenEdgesDeferringSystemGestures];
+    [self.navigationController setNeedsUpdateOfHomeIndicatorAutoHidden];
+    [self.navigationController.parentViewController setNeedsUpdateOfScreenEdgesDeferringSystemGestures];
+    [self.navigationController.parentViewController setNeedsUpdateOfHomeIndicatorAutoHidden];
+#endif
     
 #if !TARGET_OS_TV
     [[self revealViewController] setPrimaryViewController:self];
@@ -951,6 +957,18 @@ static NSString *const BUREAU_ORIENTATION_LOCK_KEY = @"MoonlightBureauOrientatio
     }];
 }
 
+// Moonlight Bureau: during a session, the swipe up from the bottom edge (home) and down from
+// the top edge (notifications, Control Center) first go to the PC, as a mouse move. The system
+// gesture needs a second swipe while the indicator is shown, like in games
+// (preferredScreenEdgesDeferringSystemGestures). The home indicator is hidden.
+- (UIRectEdge)preferredScreenEdgesDeferringSystemGestures {
+    return UIRectEdgeBottom | UIRectEdgeTop;
+}
+
+- (BOOL)prefersHomeIndicatorAutoHidden {
+    return YES;
+}
+
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     [self bureauFitStreamView];
@@ -1714,12 +1732,25 @@ static CGFloat BureauTouchDistance(UIGestureRecognizer *g) {
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     return self.topViewController ? self.topViewController.supportedInterfaceOrientations : UIInterfaceOrientationMaskLandscape;
 }
+// Same for system edge gestures and the home indicator (Apple: the container asks its child)
+- (UIViewController *)childViewControllerForScreenEdgesDeferringSystemGestures {
+    return self.topViewController;
+}
+- (UIViewController *)childViewControllerForHomeIndicatorAutoHidden {
+    return self.topViewController;
+}
 @end
 
 #import "SWRevealViewController.h"
 @implementation SWRevealViewController (MoonlightBureauOrientation)
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     return self.frontViewController ? self.frontViewController.supportedInterfaceOrientations : UIInterfaceOrientationMaskLandscape;
+}
+- (UIViewController *)childViewControllerForScreenEdgesDeferringSystemGestures {
+    return self.frontViewController;
+}
+- (UIViewController *)childViewControllerForHomeIndicatorAutoHidden {
+    return self.frontViewController;
 }
 @end
 #endif

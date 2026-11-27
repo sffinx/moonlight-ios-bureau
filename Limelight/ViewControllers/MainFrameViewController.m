@@ -953,6 +953,11 @@ static NSMutableSet* hostList;
     [self disableUpButton];
     
     // Set the gesture
+    // Moonlight Bureau: the gradient runs under the (transparent) navigation bar too
+    self.extendedLayoutIncludesOpaqueBars = YES;
+    self.edgesForExtendedLayout = UIRectEdgeAll;
+    self.navigationController.navigationBar.translucent = YES;
+
     // Moonlight Bureau: no sideways swipe (it moved the whole screen); gear button only
     [_settingsButton setTitle:nil];
     [_settingsButton setImage:[UIImage systemImageNamed:@"gearshape"]];
@@ -1240,6 +1245,13 @@ static NSString *const BUREAU_RESUME_KEY = @"MoonlightBureauResumeAt";
     if (@available(iOS 16.0, *)) {
         [self.navigationController setNeedsUpdateOfSupportedInterfaceOrientations];
         [self setNeedsUpdateOfSupportedInterfaceOrientations];
+    }
+    // Back from a session: normal system gestures and home indicator again
+    {
+        [self.navigationController setNeedsUpdateOfScreenEdgesDeferringSystemGestures];
+        [self.navigationController setNeedsUpdateOfHomeIndicatorAutoHidden];
+        [self.navigationController.parentViewController setNeedsUpdateOfScreenEdgesDeferringSystemGestures];
+        [self.navigationController.parentViewController setNeedsUpdateOfHomeIndicatorAutoHidden];
     }
 #endif
 

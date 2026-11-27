@@ -151,7 +151,15 @@ static UIImage* noImage;
     
     if ([_app.id isEqualToString:_app.host.currentGame]) {
         // Only create the app overlay if needed
+#if TARGET_OS_TV
         _appOverlay = [[UIImageView alloc] initWithImage:[UIImage imageNamed:@"Play"]];
+#else
+        // Moonlight Bureau: small green "running" badge in the corner, over nothing important
+        _appOverlay = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"play.circle.fill"]];
+        _appOverlay.tintColor = UIColor.systemGreenColor;
+        _appOverlay.backgroundColor = UIColor.whiteColor;
+        _appOverlay.accessibilityLabel = @"En cours";
+#endif
         _appOverlay.layer.shadowColor = [UIColor blackColor].CGColor;
         _appOverlay.layer.shadowOffset = CGSizeMake(0, 0);
         _appOverlay.layer.shadowOpacity = 1;
@@ -192,7 +200,22 @@ static UIImage* noImage;
     CGFloat padding = 5.f;
     CGSize frameSize = _appImage.frame.size;
     CGPoint center = _appImage.center;
-    
+#if !TARGET_OS_TV
+    if (_appOverlay != nil) {
+        CGFloat badge = frameSize.width / 4;
+        _appOverlay.frame = CGRectMake(frameSize.width - badge - 3 * padding, 3 * padding, badge, badge);
+        _appOverlay.layer.cornerRadius = badge / 2;
+        _appOverlay.clipsToBounds = YES;
+        _appOverlay.layer.shadowOpacity = 0;
+    }
+    if (_appLabel != nil) {
+        [_appLabel setFrame:CGRectMake(padding, padding, frameSize.width - 2 * padding, frameSize.height - 2 * padding)];
+    }
+    if (YES) {
+        return;
+    }
+#endif
+
     if (_appLabel != nil) {
         if (_appOverlay != nil) {
             _appOverlay.frame = CGRectMake(0, 0, frameSize.width / 3, frameSize.width / 3);
