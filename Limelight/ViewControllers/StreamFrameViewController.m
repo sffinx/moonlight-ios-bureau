@@ -1200,6 +1200,11 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
         // two-finger scroll could work. The recognizer sits on the scroll view (multi-touch).
         _streamView.multipleTouchEnabled = YES;
         _scrollView.multipleTouchEnabled = YES;
+        // The scroll view's own pinch started on any two-finger move and dragged / rubber-banded
+        // the whole image while scrolling. Zoom is done by bureauWheel: instead, only when the
+        // fingers clearly spread apart or come together, pivoting on the cursor.
+        _scrollView.pinchGestureRecognizer.enabled = NO;
+        _scrollView.bouncesZoom = NO;
         [(_scrollView ?: _streamView) addGestureRecognizer:wheel];
     }
 
@@ -1420,7 +1425,6 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
     }
     if (pan.state != UIGestureRecognizerStateChanged) {
         if (_bureauWheelMode == 1) {
-            _scrollView.pinchGestureRecognizer.enabled = YES;
             if (pan.state == UIGestureRecognizerStateEnded) {
                 CGPoint v = [pan velocityInView:nil];
                 // Keep only the main direction, like the wheel itself
@@ -1445,19 +1449,26 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
         CGFloat travel = hypot(_bureauWheelTravel.x, _bureauWheelTravel.y);
         CGFloat spread = fabs(BureauTouchDistance(pan) - _bureauWheelStartDistance);
         if (spread > 24 && spread > travel) {
-            _bureauWheelMode = 2; // fingers move apart/together: zoom, handled by the scroll view
+            _bureauWheelMode = 2; // fingers move apart/together: zoom
         } else if (travel > 8 && travel > spread * 1.5) {
-            // Fingers move together: wheel. Stop the pinch and undo its small zoom.
-            _bureauWheelMode = 1;
-            _scrollView.pinchGestureRecognizer.enabled = NO;
-            if (fabs(_scrollView.zoomScale - _bureauWheelStartZoom) > 0.001) {
-                [_scrollView setZoomScale:_bureauWheelStartZoom animated:NO];
-                [self bureauCenterOnCursor];
-            }
+            _bureauWheelMode = 1; // fingers move together: wheel
             t = _bureauWheelTravel;
         } else {
-            return;
+            return; // nothing moves until the gesture is clear
         }
+    }
+    if (_bureauWheelMode == 2) {
+        // Zoom = finger spread ratio, pivot on the cursor (the view follows it)
+        CGFloat distance = BureauTouchDistance(pan);
+        if (distance > 1 && _bureauWheelStartDistance > 1) {
+            CGFloat zoom = _bureauWheelStartZoom * distance / _bureauWheelStartDistance;
+            zoom = MAX(_scrollView.minimumZoomScale, MIN(_scrollView.maximumZoomScale, zoom));
+            if (fabs(zoom - _scrollView.zoomScale) > 0.001) {
+                [_scrollView setZoomScale:zoom animated:NO];
+                [self bureauCenterOnCursor];
+            }
+        }
+        return;
     }
     if (_bureauWheelMode != 1) {
         return;

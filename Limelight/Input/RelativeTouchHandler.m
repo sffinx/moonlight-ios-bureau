@@ -42,6 +42,9 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
     CFTimeInterval lastMoveTime;
     CGPoint velocity;                  // points per second, smoothed
     CADisplayLink* flingLink;
+    // Moonlight Bureau: a two-finger gesture (wheel, zoom, right click) is under way; the finger
+    // left on screen while the other lifts must not move the cursor (the view would follow it)
+    BOOL multiTouchSequence;
     CFTimeInterval flingStart;
     CGFloat flingSpeed, flingDuration, flingDirX, flingDirY;
     CGPoint flingPrevious;
@@ -186,6 +189,14 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
     velocity = CGPointZero;
     lastMoveTime = CACurrentMediaTime();
 #endif
+#if !TARGET_OS_TV
+    if ([[event allTouches] count] == [touches count]) {
+        multiTouchSequence = NO; // first finger(s) of a new gesture
+    }
+    if ([[event allTouches] count] >= 2) {
+        multiTouchSequence = YES;
+    }
+#endif
     touchMoved = false;
     peakTouchCount = [[event allTouches] count];
     if ([[event allTouches] count] == 1) {
@@ -211,6 +222,11 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
 }
 
 - (void)touchesMoved:(NSSet *)touches withEvent:(UIEvent *)event {
+#if !TARGET_OS_TV
+    if (multiTouchSequence && [[event allTouches] count] == 1) {
+        return;
+    }
+#endif
     if ([[event allTouches] count] == 1) {
         UITouch *touch = [[event allTouches] anyObject];
         CGPoint currentLocation = [touch locationInView:view];
