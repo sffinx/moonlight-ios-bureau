@@ -34,6 +34,29 @@ jobs:
         run: |
           xcodebuild -downloadPlatform iOS || echo "::warning::xcodebuild -downloadPlatform iOS a échoué (simulateur seulement), compilation iphoneos poursuivie"
 
+      - name: Go (Tailscale intégré)
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Build Tailscale bridge (libtsbridge.a, iOS arm64)
+        # Tailscale (tsnet) compiled into the app: no Tailscale app, no iOS VPN.
+        working-directory: libs/tsbridge/src
+        run: |
+          set -euo pipefail
+          go get tailscale.com@latest
+          go mod tidy
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          export CGO_ENABLED=1 GOOS=ios GOARCH=arm64
+          export CC="$(xcrun --sdk iphoneos --find clang)"
+          export CGO_CFLAGS="-isysroot $SDK -arch arm64 -miphoneos-version-min=15.0"
+          export CGO_LDFLAGS="-isysroot $SDK -arch arm64 -miphoneos-version-min=15.0"
+          mkdir -p ../lib/iOS
+          go build -trimpath -ldflags="-s -w" -buildmode=c-archive -o ../lib/iOS/libtsbridge.a .
+          ls -l ../lib/iOS
+          grep tailscale.com go.mod
+
       - name: Build Release (iphoneos, non signé)
         run: |
           set -o pipefail

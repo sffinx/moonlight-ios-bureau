@@ -8,6 +8,9 @@
 @import ImageIO;
 
 #import "MainFrameViewController.h"
+#if !TARGET_OS_TV
+#import "../Stream/TailscaleBridge.h"
+#endif
 #import "CryptoManager.h"
 #import "HttpManager.h"
 #import "Connection.h"
@@ -55,6 +58,12 @@
     bool _background;
     // Moonlight Bureau: launch the PC's app as soon as its list is known (shortcut, resume)
     NSDate* _bureauAutoLaunchUntil;
+#if !TARGET_OS_TV
+    NSTimer* _bureauTailscaleTimer;
+    UIBarButtonItem* _bureauTailscaleItem;
+    NSDictionary* _bureauTailscale;
+    BOOL _bureauTailscaleLoginShown;
+#endif
 #if !TARGET_OS_TV
     CAGradientLayer* _bureauBackground;
     CGFloat _bureauHostsWidth;
@@ -958,6 +967,17 @@ static NSMutableSet* hostList;
     self.edgesForExtendedLayout = UIRectEdgeAll;
     self.navigationController.navigationBar.translucent = YES;
 
+    // Moonlight Bureau: in-app Tailscale status (green: connected, orange: login needed)
+    _bureauTailscaleItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"network"]
+                                                            style:UIBarButtonItemStylePlain
+                                                           target:self
+                                                           action:@selector(bureauShowTailscale)];
+    _bureauTailscaleItem.accessibilityLabel = @"Tailscale";
+    NSArray *rightItems = self.navigationItem.rightBarButtonItems ?: @[];
+    self.navigationItem.rightBarButtonItems = [rightItems arrayByAddingObject:_bureauTailscaleItem];
+    _bureauTailscaleTimer = [NSTimer scheduledTimerWithTimeInterval:2 target:self selector:@selector(bureauPollTailscale) userInfo:nil repeats:YES];
+    [self bureauPollTailscale];
+
     // Moonlight Bureau: no sideways swipe (it moved the whole screen); gear button only
     [_settingsButton setTitle:nil];
     [_settingsButton setImage:[UIImage systemImageNamed:@"gearshape"]];
@@ -1117,6 +1137,94 @@ static NSMutableSet* hostList;
             [self hostClicked:matchingHost view:nil];
         }
     }
+}
+
+#pragma mark Moonlight Bureau: in-app Tailscale
+
+- (void)bureauPollTailscale {
+    char *raw = MBTailscaleStatus();
+    if (raw == NULL) {
+        return;
+    }
+    NSData *data = [NSData dataWithBytes:raw length:strlen(raw)];
+    free(raw);
+    NSDictionary *ts = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![ts isKindOfClass:[NSDictionary class]]) {
+        return;
+    }
+    _bureauTailscale = ts;
+    BOOL forwarding = [ts[@"forwarding"] boolValue];
+    NSString *state = ts[@"state"];
+    NSString *authURL = ts[@"authURL"];
+    _bureauTailscaleItem.tintColor = forwarding ? UIColor.systemGreenColor
+        : ([state isEqualToString:@"NeedsLogin"] ? UIColor.systemOrangeColor : [UIColor colorWithWhite:1 alpha:0.5]);
+
+    if (forwarding) {
+        [self bureauUseRelayAddress];
+    }
+    // First launch: ask once for the Tailscale login (then it is remembered)
+    if ([state isEqualToString:@"NeedsLogin"] && authURL.length > 0 && !_bureauTailscaleLoginShown &&
+        self.navigationController.topViewController == self && self.presentedViewController == nil &&
+        self.view.window != nil) {
+        _bureauTailscaleLoginShown = YES;
+        [self bureauShowTailscale];
+    }
+}
+
+// The phone PC (Sunshine Tel, HTTP port 48989) gets the relay address 127.0.0.1:48989; its
+// other addresses stay, so the Tailscale app (VPN) or the home network still work as well.
+- (void)bureauUseRelayAddress {
+    NSString *relay = @"127.0.0.1:48989";
+    @synchronized (hostList) {
+        for (TemporaryHost *host in hostList) {
+            if ([host.address isEqualToString:relay]) {
+                continue;
+            }
+            BOOL phonePC = NO;
+            for (NSString *a in @[host.address ?: @"", host.localAddress ?: @"", host.externalAddress ?: @"", host.activeAddress ?: @""]) {
+                if ([a hasSuffix:@":48989"]) {
+                    phonePC = YES;
+                }
+            }
+            if (!phonePC) {
+                continue;
+            }
+            Log(LOG_I, @"Moonlight Bureau: %@ reachable through the in-app Tailscale relay", host.name);
+            host.address = relay;
+            [[[DataManager alloc] init] updateHost:host];
+        }
+    }
+}
+
+- (void)bureauShowTailscale {
+    NSDictionary *ts = _bureauTailscale ?: @{};
+    NSString *state = ts[@"state"] ?: @"";
+    NSString *authURL = ts[@"authURL"] ?: @"";
+    NSMutableString *message = [NSMutableString string];
+    if ([ts[@"forwarding"] boolValue]) {
+        [message appendFormat:@"Connecté, sans VPN.\nPC « %@ » : %@\nCet iPhone : %@", ts[@"targetName"], ts[@"target"], ts[@"selfIP"]];
+    } else if ([state isEqualToString:@"NeedsLogin"]) {
+        [message appendString:@"Tailscale est intégré à l'appli : plus besoin de l'appli Tailscale ni du VPN. Connecte-toi une fois à ton compte Tailscale (le même que sur le PC), l'appli s'en souviendra."];
+    } else {
+        [message appendFormat:@"État : %@", state];
+        NSString *error = ts[@"error"];
+        if (error.length > 0) {
+            [message appendFormat:@"\n%@", error];
+        }
+        NSArray *log = ts[@"log"];
+        if ([log isKindOfClass:[NSArray class]] && log.count > 0) {
+            NSArray *tail = [log subarrayWithRange:NSMakeRange(log.count > 5 ? log.count - 5 : 0, MIN(log.count, (NSUInteger)5))];
+            [message appendFormat:@"\n\n%@", [tail componentsJoinedByString:@"\n"]];
+        }
+    }
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Tailscale intégré" message:message preferredStyle:UIAlertControllerStyleAlert];
+    if (authURL.length > 0 && ![ts[@"forwarding"] boolValue]) {
+        [alert addAction:[UIAlertAction actionWithTitle:@"Se connecter" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            [[UIApplication sharedApplication] openURL:[NSURL URLWithString:authURL] options:@{} completionHandler:nil];
+        }]];
+    }
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+    [[self activeViewController] presentViewController:alert animated:YES completion:nil];
 }
 
 #pragma mark Moonlight Bureau: direct launch and resume

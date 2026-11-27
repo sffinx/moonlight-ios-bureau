@@ -467,7 +467,9 @@ void ClSetControllerLED(uint16_t controllerNumber, uint8_t r, uint8_t g, uint8_t
     // need to check for that here.
     _streamConfig.encryptionFlags = ENCFLG_ALL;
     
-    if ([Utils isActiveNetworkVPN]) {
+    // Moonlight Bureau: 127.0.0.1 is the in-app Tailscale relay, so the stream crosses the
+    // Internet in a tunnel: same settings as with a VPN
+    if ([Utils isActiveNetworkVPN] || strncmp(_hostString, "127.", 4) == 0) {
         // Force remote streaming mode when a VPN is connected
         _streamConfig.streamingRemotely = STREAM_CFG_REMOTE;
         _streamConfig.packetSize = 1024;

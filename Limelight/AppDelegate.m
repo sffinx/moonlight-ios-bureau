@@ -7,6 +7,9 @@
 //
 
 #import "AppDelegate.h"
+#if !TARGET_OS_TV
+#import "Stream/TailscaleBridge.h"
+#endif
 
 @implementation AppDelegate
 
@@ -23,6 +26,14 @@ static NSString* DB_NAME = @"Limelight_iOS.sqlite";
 #endif
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+#if !TARGET_OS_TV
+    // Moonlight Bureau: Tailscale inside the app. The node "iphone-moonlight-bureau" relays the
+    // ports of the PC's phone instance (Sunshine Tel, 48984-49010) from 127.0.0.1 to the PC
+    // "pc-maison". Its login is kept in Application Support/tailscale.
+    NSURL *support = [[NSFileManager defaultManager] URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
+    NSString *tsDir = [support.path stringByAppendingPathComponent:@"tailscale"];
+    MBTailscaleStart((char *)tsDir.fileSystemRepresentation, (char *)"iphone-moonlight-bureau", (char *)"pc-maison", 48984, 49010);
+#endif
 #if !TARGET_OS_TV
     UIApplicationShortcutItem* shortcut = [launchOptions valueForKey:UIApplicationLaunchOptionsShortcutItemKey];
     if (shortcut != nil) {
