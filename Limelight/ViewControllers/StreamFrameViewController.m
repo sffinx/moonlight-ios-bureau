@@ -79,6 +79,7 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
     UIButton *_bureauPinButton;
     UIView *_bureauComposer;
     UITextView *_bureauTextView;
+    NSLayoutConstraint *_bureauTextHeight;
     UILabel *_bureauPlaceholder;
     NSTimer *_bureauHideTimer;
     BOOL _bureauPinned;
@@ -336,6 +337,25 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
         return;
     }
     CGPoint p = [_streamView convertPoint:_bureauCursor toView:_scrollView];
+    if (_scrollView.zoomScale <= 1.01f) {
+        // Keyboard up, not zoomed: the desktop stays still and only slides up when the
+        // cursor would go under the keyboard, just enough to keep it in sight (and back down
+        // when it comes back up). Centering on it made the whole image follow every move.
+        CGFloat visibleHeight = MAX(_scrollView.bounds.size.height - _bureauKeyboardOverlap, 1);
+        CGFloat margin = MIN(48, visibleHeight / 4);
+        CGFloat y = _scrollView.contentOffset.y;
+        if (p.y - y > visibleHeight - margin) {
+            y = p.y - visibleHeight + margin;
+        }
+        if (p.y - y < margin) {
+            y = p.y - margin;
+        }
+        y = MIN(MAX(y, 0), _bureauKeyboardOverlap);
+        if (_scrollView.contentOffset.x != 0 || fabs(y - _scrollView.contentOffset.y) > 0.5) {
+            [_scrollView setContentOffset:CGPointMake(0, y) animated:NO];
+        }
+        return;
+    }
     CGSize visible = _scrollView.bounds.size;
     // With the keyboard up, only the part above it is visible: the desktop slides up
     // with the cursor (like Chrome Remote Desktop) and can go up to the keyboard's height
@@ -1550,26 +1570,31 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
 }
 
 - (void)setupBureauComposer {
-    // Composer pinned on top of the iOS keyboard (keyboardLayoutGuide, iOS 15+)
-    _bureauComposer = [[UIView alloc] init];
-    _bureauComposer.translatesAutoresizingMaskIntoConstraints = NO;
-    _bureauComposer.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.96];
-    _bureauComposer.hidden = YES;
+    // Composer pinned on top of the iOS keyboard (keyboardLayoutGuide, iOS 15+), same look as
+    // the toolbar (dark blur), one compact line that grows with the text up to 3 lines
+    UIVisualEffectView *composer = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark]];
+    composer.translatesAutoresizingMaskIntoConstraints = NO;
+    composer.hidden = YES;
+    _bureauComposer = composer;
     [self.view addSubview:_bureauComposer];
 
     UIButton *hideKeyboard = [self bureauButtonWithSymbol:@"keyboard.chevron.compact.down" title:@"Fermer le clavier" action:@selector(bureauHideComposer)];
     UIButton *backspace = [self bureauButtonWithSymbol:@"delete.left" title:@"Retour arrière sur le PC" action:@selector(bureauSendBackspace)];
     UIButton *enter = [self bureauButtonWithSymbol:@"return" title:@"Envoyer puis Entrée" action:@selector(bureauSendWithEnter)];
     UIButton *send = [self bureauButtonWithSymbol:@"paperplane.fill" title:@"Envoyer" action:@selector(bureauSendText)];
+    send.tintColor = UIColor.systemBlueColor;
 
     _bureauTextView = [[UITextView alloc] init];
-    _bureauTextView.backgroundColor = UIColor.clearColor;
+    _bureauTextView.backgroundColor = [UIColor colorWithWhite:1 alpha:0.12];
+    _bureauTextView.layer.cornerRadius = 17;
+    _bureauTextView.layer.cornerCurve = kCACornerCurveContinuous;
     _bureauTextView.textColor = UIColor.whiteColor;
     _bureauTextView.tintColor = UIColor.whiteColor;
-    _bureauTextView.font = [UIFont systemFontOfSize:17];
+    _bureauTextView.font = [UIFont systemFontOfSize:16];
     _bureauTextView.keyboardAppearance = UIKeyboardAppearanceDark;
     _bureauTextView.scrollEnabled = YES;
-    _bureauTextView.textContainerInset = UIEdgeInsetsMake(8, 0, 8, 0);
+    _bureauTextView.textContainerInset = UIEdgeInsetsMake(8, 10, 8, 10);
+    _bureauTextView.textContainer.lineFragmentPadding = 0;
     _bureauTextView.delegate = (id<UITextViewDelegate>)self;
     if (@available(iOS 17.0, *)) {
         _bureauTextView.inlinePredictionType = UITextInlinePredictionTypeNo;
@@ -1577,17 +1602,20 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
     _bureauPlaceholder = [[UILabel alloc] init];
     _bureauPlaceholder.text = @"Texte à envoyer…";
     _bureauPlaceholder.textColor = [UIColor colorWithWhite:1 alpha:0.4];
-    _bureauPlaceholder.font = [UIFont systemFontOfSize:17];
+    _bureauPlaceholder.font = [UIFont systemFontOfSize:16];
     _bureauPlaceholder.translatesAutoresizingMaskIntoConstraints = NO;
     [_bureauTextView addSubview:_bureauPlaceholder];
 
     UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[hideKeyboard, _bureauTextView, backspace, enter, send]];
     row.axis = UILayoutConstraintAxisHorizontal;
     row.alignment = UIStackViewAlignmentCenter;
-    row.spacing = 4;
+    row.spacing = 2;
     row.translatesAutoresizingMaskIntoConstraints = NO;
-    [_bureauComposer addSubview:row];
+    [composer.contentView addSubview:row];
 
+    // Fixed height that follows the text (a scrolling text view has no height of its own:
+    // between a minimum and a maximum, Auto Layout gave it the maximum)
+    _bureauTextHeight = [_bureauTextView.heightAnchor constraintEqualToConstant:34];
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
         [_bureauComposer.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
@@ -1595,14 +1623,27 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
         [_bureauComposer.bottomAnchor constraintEqualToAnchor:self.view.keyboardLayoutGuide.topAnchor],
         [row.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:4],
         [row.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-4],
-        [row.topAnchor constraintEqualToAnchor:_bureauComposer.topAnchor constant:4],
-        [row.bottomAnchor constraintEqualToAnchor:_bureauComposer.bottomAnchor constant:-4],
-        [_bureauTextView.heightAnchor constraintGreaterThanOrEqualToConstant:40],
-        [_bureauTextView.heightAnchor constraintLessThanOrEqualToConstant:96],
-        [_bureauPlaceholder.leadingAnchor constraintEqualToAnchor:_bureauTextView.leadingAnchor constant:5],
-        [_bureauPlaceholder.topAnchor constraintEqualToAnchor:_bureauTextView.topAnchor constant:8],
+        [row.topAnchor constraintEqualToAnchor:composer.contentView.topAnchor constant:2],
+        [row.bottomAnchor constraintEqualToAnchor:composer.contentView.bottomAnchor constant:-2],
+        _bureauTextHeight,
+        [_bureauPlaceholder.leadingAnchor constraintEqualToAnchor:_bureauTextView.leadingAnchor constant:10],
+        [_bureauPlaceholder.centerYAnchor constraintEqualToAnchor:_bureauTextView.topAnchor constant:17],
     ]];
     [_bureauTextView setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+}
+
+- (void)bureauFitComposerHeight {
+    CGFloat width = _bureauTextView.bounds.size.width;
+    if (width < 10) {
+        return;
+    }
+    CGFloat fit = [_bureauTextView sizeThatFits:CGSizeMake(width, CGFLOAT_MAX)].height;
+    CGFloat height = MIN(MAX(ceil(fit), 34), 84); // 1 to 3 lines, then it scrolls
+    if (fabs(_bureauTextHeight.constant - height) > 0.5) {
+        _bureauTextHeight.constant = height;
+        [self.view layoutIfNeeded];
+        [self bureauUpdateKeyboardOverlap];
+    }
 }
 
 #pragma mark Toolbar visibility
@@ -1720,6 +1761,8 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
     _bureauComposer.hidden = NO;
     [self.view bringSubviewToFront:_bureauComposer];
     [_bureauTextView becomeFirstResponder];
+    [self.view layoutIfNeeded];
+    [self bureauFitComposerHeight];
     [self.view setNeedsLayout];
 }
 
@@ -1738,6 +1781,7 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
 
 - (void)textViewDidChange:(UITextView *)textView {
     if (textView == _bureauTextView) {
+        [self bureauFitComposerHeight];
         _bureauPlaceholder.hidden = textView.text.length > 0;
     }
 }
@@ -1750,6 +1794,7 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
     [_bureauTextView.inputDelegate textWillChange:_bureauTextView];
     _bureauTextView.text = @"";
     [_bureauTextView.inputDelegate textDidChange:_bureauTextView];
+    [self bureauFitComposerHeight];
     _bureauPlaceholder.hidden = NO;
     handler(text);
 }
