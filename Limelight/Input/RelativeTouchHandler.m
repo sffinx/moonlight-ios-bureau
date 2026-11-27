@@ -47,6 +47,11 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
     BOOL multiTouchSequence;
     // A touch that only stops a moving cursor or wheel (fling) must not click
     BOOL touchStoppedFling;
+    // The first finger of a two-finger gesture lands a few hundredths of a second before the
+    // second one: its movement is held back during that time, and dropped if a second finger
+    // comes (otherwise the cursor, and the zoomed view following it, jumped at each scroll)
+    CFTimeInterval firstTouchTime;
+    CGPoint heldMove;
     CFTimeInterval flingStart;
     CGFloat flingSpeed, flingDuration, flingDirX, flingDirY;
     CGPoint flingPrevious;
@@ -209,6 +214,12 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
         multiTouchSequence = YES;
     }
 #endif
+#if !TARGET_OS_TV
+    if ([[event allTouches] count] == [touches count]) {
+        firstTouchTime = CACurrentMediaTime();
+        heldMove = CGPointZero;
+    }
+#endif
     touchMoved = false;
     peakTouchCount = [[event allTouches] count];
     if ([[event allTouches] count] == 1) {
@@ -262,7 +273,12 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
             // Smoothed velocity (points per second) for the fling
             velocity = CGPointMake(0.6 * dx / dt + 0.4 * velocity.x, 0.6 * dy / dt + 0.4 * velocity.y);
             lastMoveTime = now;
-            [self moveCursorByX:dx y:dy];
+            if (now - firstTouchTime < 0.12) {
+                heldMove = CGPointMake(heldMove.x + dx, heldMove.y + dy);
+            } else {
+                [self moveCursorByX:dx + heldMove.x y:dy + heldMove.y];
+                heldMove = CGPointZero;
+            }
             touchLocation = currentLocation;
             if ([self isConfirmedMove:screenTouch from:screenOriginal]) {
                 touchMoved = true;
@@ -313,6 +329,13 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
 - (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event {
     [dragTimer invalidate];
     dragTimer = nil;
+#if !TARGET_OS_TV
+    // Very quick one-finger flick: send what was held back
+    if (!multiTouchSequence && (heldMove.x != 0 || heldMove.y != 0)) {
+        [self moveCursorByX:heldMove.x y:heldMove.y];
+    }
+    heldMove = CGPointZero;
+#endif
 #if !TARGET_OS_TV
     if (!isDragging && touchMoved && peakTouchCount == 1 && [[event allTouches] count] == [touches count] &&
         CACurrentMediaTime() - lastMoveTime < FLING_MAX_IDLE) {

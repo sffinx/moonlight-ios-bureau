@@ -1494,8 +1494,9 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
         _bureauWheelTravel.y += t.y;
         CGFloat travel = hypot(_bureauWheelTravel.x, _bureauWheelTravel.y);
         CGFloat spread = fabs(BureauTouchDistance(pan) - _bureauWheelStartDistance);
-        if (spread > 24 && spread > travel) {
+        if (spread > 30 && spread > travel * 1.5) {
             _bureauWheelMode = 2; // fingers move apart/together: zoom
+            _bureauWheelStartDistance = BureauTouchDistance(pan); // no jump when zoom starts
         } else if (travel > 8 && travel > spread * 1.5) {
             _bureauWheelMode = 1; // fingers move together: wheel
             t = _bureauWheelTravel;
@@ -1507,9 +1508,11 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
         // Zoom = finger spread ratio, pivot on the cursor (the view follows it)
         CGFloat distance = BureauTouchDistance(pan);
         if (distance > 1 && _bureauWheelStartDistance > 1) {
-            CGFloat zoom = _bureauWheelStartZoom * distance / _bureauWheelStartDistance;
-            zoom = MAX(_scrollView.minimumZoomScale, MIN(_scrollView.maximumZoomScale, zoom));
-            if (fabs(zoom - _scrollView.zoomScale) > 0.001) {
+            CGFloat target = _bureauWheelStartZoom * distance / _bureauWheelStartDistance;
+            target = MAX(_scrollView.minimumZoomScale, MIN(_scrollView.maximumZoomScale, target));
+            // Smoothed, and ignores the finger jitter of a few points: no trembling
+            CGFloat zoom = _scrollView.zoomScale + (target - _scrollView.zoomScale) * 0.5;
+            if (fabs(target - _scrollView.zoomScale) > 0.01) {
                 [_scrollView setZoomScale:zoom animated:NO];
                 [self bureauCenterOnCursor];
             }
