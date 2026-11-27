@@ -94,6 +94,49 @@ func MBTailscaleStatus() *C.char {
 	return C.CString(string(out))
 }
 
+// MBTailscaleLogin asks Tailscale for a fresh login link and returns it (empty when already
+// connected). A link is tied to its login attempt: after a failed attempt (wrong account), the
+// old link keeps showing the same error page. Blocks up to 15 s; call it off the main thread.
+// The caller frees the string with free().
+//
+//export MBTailscaleLogin
+func MBTailscaleLogin() *C.char {
+	mu.Lock()
+	s := server
+	old := authURL
+	mu.Unlock()
+	if s == nil {
+		return C.CString(old)
+	}
+	lc, err := s.LocalClient()
+	if err != nil {
+		setError(err)
+		return C.CString(old)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := lc.StartLoginInteractive(ctx); err != nil {
+		setError(err)
+	}
+	for ctx.Err() == nil {
+		st, err := lc.StatusWithoutPeers(ctx)
+		if err == nil {
+			if st.BackendState == "Running" {
+				return C.CString("")
+			}
+			if st.AuthURL != "" && st.AuthURL != old {
+				mu.Lock()
+				authURL = st.AuthURL
+				mu.Unlock()
+				addLog("nouveau lien de connexion")
+				return C.CString(st.AuthURL)
+			}
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return C.CString(old)
+}
+
 func run(dir string, hostname string, portStart, portEnd int) {
 	// No log upload to Tailscale's servers
 	os.Setenv("TS_NO_LOGS_NO_SUPPORT", "true")

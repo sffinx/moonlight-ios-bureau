@@ -1196,6 +1196,20 @@ static NSMutableSet* hostList;
     }
 }
 
+// Always a fresh link: an old one stays stuck on the error of a failed attempt (wrong account)
+- (void)bureauOpenFreshTailscaleLogin {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        char *raw = MBTailscaleLogin();
+        NSString *url = raw != NULL ? [NSString stringWithUTF8String:raw] : @"";
+        free(raw);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (url.length > 0) {
+                [[UIApplication sharedApplication] openURL:[NSURL URLWithString:url] options:@{} completionHandler:nil];
+            }
+        });
+    });
+}
+
 - (void)bureauShowTailscale {
     NSDictionary *ts = _bureauTailscale ?: @{};
     NSString *state = ts[@"state"] ?: @"";
@@ -1220,7 +1234,7 @@ static NSMutableSet* hostList;
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Tailscale intégré" message:message preferredStyle:UIAlertControllerStyleAlert];
     if (authURL.length > 0 && ![ts[@"forwarding"] boolValue]) {
         [alert addAction:[UIAlertAction actionWithTitle:@"Se connecter" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            [[UIApplication sharedApplication] openURL:[NSURL URLWithString:authURL] options:@{} completionHandler:nil];
+            [self bureauOpenFreshTailscaleLogin];
         }]];
     }
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];

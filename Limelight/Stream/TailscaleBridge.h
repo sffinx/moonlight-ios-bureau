@@ -13,3 +13,6 @@ void MBTailscaleStart(char *dir, char *hostname, char *peer, int portStart, int 
 
 // State as JSON (state, authURL, selfIP, target, forwarding, error, log). Free with free().
 char *MBTailscaleStatus(void);
+
+// Fresh login link (empty if already connected). Blocks up to 15 s. Free with free().
+char *MBTailscaleLogin(void);
