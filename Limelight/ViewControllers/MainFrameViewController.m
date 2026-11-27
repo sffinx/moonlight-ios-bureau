@@ -1198,14 +1198,35 @@ static NSMutableSet* hostList;
 
 // Always a fresh link: an old one stays stuck on the error of a failed attempt (wrong account)
 - (void)bureauOpenFreshTailscaleLogin {
+    // A few seconds while Tailscale prepares the link: say so, with a spinner
+    UIAlertController *wait = [UIAlertController alertControllerWithTitle:@"Préparation de la connexion…"
+                                                                  message:@"Tailscale prépare la page de connexion (quelques secondes).
+
+
+"
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    spinner.translatesAutoresizingMaskIntoConstraints = NO;
+    [spinner startAnimating];
+    [wait.view addSubview:spinner];
+    [NSLayoutConstraint activateConstraints:@[
+        [spinner.centerXAnchor constraintEqualToAnchor:wait.view.centerXAnchor],
+        [spinner.bottomAnchor constraintEqualToAnchor:wait.view.bottomAnchor constant:-24],
+    ]];
+    [[self activeViewController] presentViewController:wait animated:YES completion:nil];
+
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         char *raw = MBTailscaleLogin();
         NSString *url = raw != NULL ? [NSString stringWithUTF8String:raw] : @"";
         free(raw);
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (url.length > 0) {
-                [[UIApplication sharedApplication] openURL:[NSURL URLWithString:url] options:@{} completionHandler:nil];
-            }
+            [wait dismissViewControllerAnimated:YES completion:^{
+                if (url.length > 0) {
+                    [[UIApplication sharedApplication] openURL:[NSURL URLWithString:url] options:@{} completionHandler:nil];
+                } else {
+                    [self bureauShowTailscale]; // already connected, or no link: show the state
+                }
+            }];
         });
     });
 }

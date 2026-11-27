@@ -96,8 +96,10 @@ func MBTailscaleStatus() *C.char {
 
 // MBTailscaleLogin asks Tailscale for a fresh login link and returns it (empty when already
 // connected). A link is tied to its login attempt: after a failed attempt (wrong account), the
-// old link keeps showing the same error page. Blocks up to 15 s; call it off the main thread.
-// The caller frees the string with free().
+// old link keeps showing the same error page. First a new interactive login (4 s to give a
+// new link); if the link does not change, the pending attempt is dropped (logout of a node
+// that is not logged in) and a clean one is started. Blocks up to ~12 s; call it off the main
+// thread. The caller frees the string with free().
 //
 //export MBTailscaleLogin
 func MBTailscaleLogin() *C.char {
@@ -113,28 +115,53 @@ func MBTailscaleLogin() *C.char {
 		setError(err)
 		return C.CString(old)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := lc.StartLoginInteractive(ctx); err != nil {
-		setError(err)
-	}
-	for ctx.Err() == nil {
-		st, err := lc.StatusWithoutPeers(ctx)
-		if err == nil {
-			if st.BackendState == "Running" {
-				return C.CString("")
+	wait := func(d time.Duration, differentFrom string) (string, bool) {
+		ctx, cancel := context.WithTimeout(context.Background(), d)
+		defer cancel()
+		for ctx.Err() == nil {
+			st, err := lc.StatusWithoutPeers(ctx)
+			if err == nil {
+				if st.BackendState == "Running" {
+					return "", true
+				}
+				if st.AuthURL != "" && st.AuthURL != differentFrom {
+					return st.AuthURL, true
+				}
 			}
-			if st.AuthURL != "" && st.AuthURL != old {
-				mu.Lock()
-				authURL = st.AuthURL
-				mu.Unlock()
-				addLog("nouveau lien de connexion")
-				return C.CString(st.AuthURL)
-			}
+			time.Sleep(200 * time.Millisecond)
 		}
-		time.Sleep(300 * time.Millisecond)
+		return "", false
 	}
-	return C.CString(old)
+	start := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := lc.StartLoginInteractive(ctx); err != nil {
+			addLog("connexion : " + err.Error())
+		}
+	}
+
+	start()
+	url, ok := wait(4*time.Second, old)
+	if !ok {
+		addLog("lien inchangé : nouvelle tentative de connexion")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := lc.Logout(ctx); err != nil {
+			addLog("abandon de la tentative : " + err.Error())
+		}
+		cancel()
+		start()
+		url, ok = wait(8*time.Second, "")
+	}
+	if !ok {
+		return C.CString(old)
+	}
+	if url != "" {
+		mu.Lock()
+		authURL = url
+		mu.Unlock()
+		addLog("nouveau lien de connexion")
+	}
+	return C.CString(url)
 }
 
 func run(dir string, hostname string, portStart, portEnd int) {
