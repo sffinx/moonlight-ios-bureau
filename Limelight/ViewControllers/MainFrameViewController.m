@@ -55,6 +55,10 @@
     bool _background;
     // Moonlight Bureau: launch the PC's app as soon as its list is known (shortcut, resume)
     NSDate* _bureauAutoLaunchUntil;
+#if !TARGET_OS_TV
+    CAGradientLayer* _bureauBackground;
+    CGFloat _bureauHostsWidth;
+#endif
 #if TARGET_OS_TV
     UITapGestureRecognizer* _menuRecognizer;
 #endif
@@ -1186,9 +1190,39 @@ static NSString *const BUREAU_RESUME_KEY = @"MoonlightBureauResumeAt";
 }
 
 #if !TARGET_OS_TV
-// Moonlight Bureau: only the stream can be used in portrait; host list and settings stay landscape
+// Moonlight Bureau: the main screen follows the phone (portrait or landscape)
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
-    return UIInterfaceOrientationMaskLandscape;
+    return UIInterfaceOrientationMaskAllButUpsideDown;
+}
+
+// Background and PC row follow the size (rotation, first layout)
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    if (_bureauBackground == nil) {
+        _bureauBackground = [CAGradientLayer layer];
+        _bureauBackground.colors = @[
+            (id)[UIColor colorWithRed:0.10 green:0.13 blue:0.24 alpha:1].CGColor,
+            (id)[UIColor colorWithRed:0.04 green:0.05 blue:0.09 alpha:1].CGColor,
+        ];
+        _bureauBackground.startPoint = CGPointMake(0.2, 0);
+        _bureauBackground.endPoint = CGPointMake(0.8, 1);
+        // The view is the collection view (it scrolls): the gradient goes in its fixed backgroundView
+        UIView *background = [[UIView alloc] init];
+        [background.layer addSublayer:_bureauBackground];
+        self.collectionView.backgroundView = background;
+    }
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _bureauBackground.frame = self.collectionView.backgroundView.bounds.size.width > 0 ? self.collectionView.backgroundView.bounds : self.view.bounds;
+    [CATransaction commit];
+
+    CGFloat top = self.view.safeAreaInsets.top;
+    hostScrollView.frame = CGRectMake(0, top, self.view.bounds.size.width, MAX(self.view.bounds.size.height - top - self.view.safeAreaInsets.bottom, 200));
+    if (fabs(_bureauHostsWidth - self.view.bounds.size.width) > 0.5) {
+        _bureauHostsWidth = self.view.bounds.size.width;
+        [self updateHosts];
+        [self.collectionView.collectionViewLayout invalidateLayout];
+    }
 }
 #endif
 
@@ -1374,6 +1408,21 @@ static NSString *const BUREAU_RESUME_KEY = @"MoonlightBureauResumeAt";
     
     [hostScrollView addSubview:addComp];
     [hostScrollView setContentSize:CGSizeMake(prevEdge + addComp.frame.size.width, hostScrollView.frame.size.height)];
+#if !TARGET_OS_TV
+    // Moonlight Bureau: cards centered on screen (row centered, vertically too)
+    CGFloat left = CGFLOAT_MAX, right = 0;
+    for (UIView* v in hostScrollView.subviews) {
+        left = MIN(left, v.frame.origin.x);
+        right = MAX(right, CGRectGetMaxX(v.frame));
+    }
+    CGFloat shift = (hostScrollView.frame.size.width - (right - left)) / 2 - left;
+    if (shift > 0) {
+        for (UIView* v in hostScrollView.subviews) {
+            v.center = CGPointMake(v.center.x + shift, v.center.y);
+        }
+        [hostScrollView setContentSize:CGSizeMake(hostScrollView.frame.size.width, hostScrollView.frame.size.height)];
+    }
+#endif
 }
 
 - (float) getCompViewX:(UIComputerView*)comp addComp:(UIComputerView*)addComp prevEdge:(float)prevEdge {
@@ -1486,8 +1535,14 @@ static NSString *const BUREAU_RESUME_KEY = @"MoonlightBureauResumeAt";
     cell.layer.shadowPath = shadowPath.CGPath;
     
 #if !TARGET_OS_TV
-    cell.layer.borderWidth = 1;
-    cell.layer.borderColor = [[UIColor colorWithRed:0 green:0 blue:0 alpha:0.3f] CGColor];
+    // Moonlight Bureau: rounded tiles, soft shadow
+    appView.layer.cornerRadius = 16 / MAX(appView.transform.a, 0.01);
+    appView.layer.cornerCurve = kCACornerCurveContinuous;
+    appView.clipsToBounds = YES;
+    cell.layer.borderWidth = 0;
+    cell.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:cell.bounds cornerRadius:16].CGPath;
+    cell.layer.shadowOpacity = 0.35;
+    cell.layer.shadowRadius = 10;
     cell.exclusiveTouch = YES;
 #endif
 

@@ -61,14 +61,15 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
     // Moonlight Bureau toolbar
     UIButton *_bureauHandle;
     UIVisualEffectView *_bureauBar;
-    UIStackView *_bureauKeysRow;
-    UIStackView *_bureauTilesBox;
-    NSArray<UIButton *> *_bureauTiles;
-    NSArray<UIButton *> *_bureauKeyChips;
+    UIScrollView *_bureauKeysRow;
+    UIView *_bureauDataPill;
     UILabel *_bureauDataLabel;
+    CGFloat _bureauWheelStartDistance;
+    CGFloat _bureauWheelStartZoom;
+    CGPoint _bureauWheelTravel;
+    int _bureauWheelMode; // 0 = undecided, 1 = scroll, 2 = zoom
     UIButton *_bureauMuteButton;
     NSTimer *_bureauDataTimer;
-    CGFloat _bureauGridWidth;
     NSMutableDictionary<NSString *, NSNumber *> *_bureauIfLast; // last counter per interface
     UIButton *_bureauDataButton;
     UIButton *_bureauPinButton;
@@ -891,9 +892,8 @@ static NSString *const BUREAU_ORIENTATION_LOCK_KEY = @"MoonlightBureauOrientatio
 
 - (void)bureauApplyOrientationLock {
     UIInterfaceOrientationMask lock = [self bureauOrientationLock];
-    NSString *rotationTitle = lock == 0 ? @"Rotation" : (lock == UIInterfaceOrientationMaskPortrait ? @"Vertical 🔒" : @"Paysage 🔒");
-    [self bureauSetTile:_bureauRotationButton symbol:(lock != 0 ? @"lock.rotation" : @"lock.rotation.open")
-                  title:rotationTitle color:(lock != 0 ? UIColor.systemYellowColor : UIColor.systemTealColor)];
+    [self bureauSetIcon:_bureauRotationButton symbol:(lock != 0 ? @"lock.rotation" : @"lock.rotation.open")
+                   tint:(lock != 0 ? UIColor.systemYellowColor : UIColor.whiteColor)];
     if (@available(iOS 16.0, *)) {
         [self setNeedsUpdateOfSupportedInterfaceOrientations];
         [self.navigationController setNeedsUpdateOfSupportedInterfaceOrientations];
@@ -927,7 +927,6 @@ static NSString *const BUREAU_ORIENTATION_LOCK_KEY = @"MoonlightBureauOrientatio
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     [self bureauFitStreamView];
-    [self bureauLayoutGrid];
     [self bureauUpdateKeyboardOverlap];
 }
 
@@ -1016,121 +1015,135 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
 - (void)setupBureauToolbar {
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
 
-    // Panel: thick blur, rounded, top center; its grid adapts to portrait and landscape
-    _bureauBar = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThickMaterialDark]];
+    // Toolbar: blurred, rounded, top center
+    _bureauBar = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark]];
     _bureauBar.translatesAutoresizingMaskIntoConstraints = NO;
-    _bureauBar.layer.cornerRadius = 22;
-    _bureauBar.layer.cornerCurve = kCACornerCurveContinuous;
+    _bureauBar.layer.cornerRadius = 14;
     _bureauBar.clipsToBounds = YES;
+    _bureauBar.alpha = 0.92;
     _bureauBar.hidden = YES;
     [self.view addSubview:_bureauBar];
 
-    // Header: name + data used
-    UILabel *title = [[UILabel alloc] init];
-    title.text = @"Moonlight Bureau";
-    title.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
-    title.textColor = UIColor.whiteColor;
-    _bureauDataLabel = [[UILabel alloc] init];
-    _bureauDataLabel.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightMedium];
-    _bureauDataLabel.textColor = [UIColor colorWithWhite:1 alpha:0.65];
-    _bureauDataLabel.numberOfLines = 0;
-    _bureauDataButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    _bureauDataButton.accessibilityLabel = @"Afficher les données consommées";
-    [_bureauDataButton addTarget:self action:@selector(bureauToggleDataShown) forControlEvents:UIControlEventTouchUpInside];
-    [_bureauDataButton setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
-    UIStackView *titleRow = [[UIStackView alloc] initWithArrangedSubviews:@[title, _bureauDataButton]];
-    titleRow.axis = UILayoutConstraintAxisHorizontal;
-    titleRow.alignment = UIStackViewAlignmentCenter;
-    UIStackView *header = [[UIStackView alloc] initWithArrangedSubviews:@[titleRow, _bureauDataLabel]];
-    header.axis = UILayoutConstraintAxisVertical;
-    header.spacing = 2;
-    [self bureauRefreshDataShown];
-
-    // Main actions, as tiles (icon + label)
-    _bureauPinButton = [self bureauTile:@"pin" title:@"Épingler" color:UIColor.systemGrayColor action:@selector(bureauTogglePin)];
-    _bureauRotationButton = [self bureauTile:@"lock.rotation.open" title:@"Rotation" color:UIColor.systemTealColor action:@selector(bureauToggleOrientationLock)];
-    _bureauMuteButton = [self bureauTile:@"speaker.wave.2.fill" title:@"Son" color:UIColor.systemGreenColor action:@selector(bureauToggleMute)];
-    _bureauTiles = @[
-        [self bureauTile:@"keyboard" title:@"Clavier" color:UIColor.systemBlueColor action:@selector(bureauShowComposer)],
-        [self bureauTile:@"command" title:@"Raccourcis" color:UIColor.systemIndigoColor action:@selector(bureauToggleKeys)],
-        [self bureauTile:@"doc.on.clipboard" title:@"Coller iPhone" color:UIColor.systemPurpleColor action:@selector(bureauPasteFromPhone)],
-        [self bureauTile:@"arrow.down.right.and.arrow.up.left" title:@"Zoom 100 %" color:UIColor.systemOrangeColor action:@selector(bureauResetZoom)],
+    _bureauPinButton = [self bureauButtonWithSymbol:@"pin" title:@"Épingler" action:@selector(bureauTogglePin)];
+    _bureauMuteButton = [self bureauButtonWithSymbol:@"speaker.wave.2" title:@"Couper le son sur l'iPhone" action:@selector(bureauToggleMute)];
+    _bureauDataButton = [self bureauButtonWithSymbol:@"chart.bar" title:@"Données consommées" action:@selector(bureauToggleDataShown)];
+    NSArray<UIButton *> *mainButtons = @[
+        [self bureauButtonWithSymbol:@"keyboard" title:@"Clavier" action:@selector(bureauShowComposer)],
+        [self bureauButtonWithSymbol:@"command" title:@"Touches" action:@selector(bureauToggleKeys)],
+        [self bureauButtonWithSymbol:@"doc.on.clipboard" title:@"Coller depuis l'iPhone" action:@selector(bureauPasteFromPhone)],
+        [self bureauButtonWithSymbol:@"arrow.down.right.and.arrow.up.left" title:@"Zoom 100 %" action:@selector(bureauResetZoom)],
         _bureauMuteButton,
-        _bureauRotationButton,
+        _bureauDataButton,
+        (_bureauRotationButton = [self bureauButtonWithSymbol:@"lock.rotation.open" title:@"Verrouiller l'orientation" action:@selector(bureauToggleOrientationLock)]),
         _bureauPinButton,
-        [self bureauTile:@"xmark.circle.fill" title:@"Quitter" color:UIColor.systemRedColor action:@selector(bureauDisconnect)],
+        [self bureauDisconnectButton],
     ];
+    UIStackView *mainRow = [[UIStackView alloc] initWithArrangedSubviews:mainButtons];
+    mainRow.axis = UILayoutConstraintAxisHorizontal;
+    mainRow.spacing = 0;
 
-    // Keys and shortcuts, as chips
+    // Keys and shortcuts row (scrolls horizontally on narrow screens)
     NSArray *keys = @[
-        @[@"Copier", @('C'), @(MODIFIER_CTRL)], @[@"Coller", @('V'), @(MODIFIER_CTRL)], @[@"Couper", @('X'), @(MODIFIER_CTRL)],
-        @[@"Annuler", @('Z'), @(MODIFIER_CTRL)], @[@"Tout sélect.", @('A'), @(MODIFIER_CTRL)], @[@"Rechercher", @('F'), @(MODIFIER_CTRL)],
-        @[@"Échap", @(BUREAU_VK_ESCAPE), @0], @[@"Tab", @(BUREAU_VK_TAB), @0], @[@"Entrée", @(BUREAU_VK_RETURN), @0],
-        @[@"Suppr", @(BUREAU_VK_DELETE), @0], @[@"⌫", @(BUREAU_VK_BACK), @0], @[@"⊞ Win", @(BUREAU_VK_LWIN), @0],
+        @[@"Échap", @(BUREAU_VK_ESCAPE), @0], @[@"Tab", @(BUREAU_VK_TAB), @0], @[@"⊞", @(BUREAU_VK_LWIN), @0],
         @[@"←", @(BUREAU_VK_LEFT), @0], @[@"↑", @(BUREAU_VK_UP), @0], @[@"↓", @(BUREAU_VK_DOWN), @0], @[@"→", @(BUREAU_VK_RIGHT), @0],
+        @[@"Entrée", @(BUREAU_VK_RETURN), @0], @[@"⌫", @(BUREAU_VK_BACK), @0], @[@"Suppr", @(BUREAU_VK_DELETE), @0],
+        @[@"Copier", @('C'), @(MODIFIER_CTRL)], @[@"Coller", @('V'), @(MODIFIER_CTRL)], @[@"Couper", @('X'), @(MODIFIER_CTRL)],
+        @[@"Annuler", @('Z'), @(MODIFIER_CTRL)], @[@"Tout", @('A'), @(MODIFIER_CTRL)], @[@"Rechercher", @('F'), @(MODIFIER_CTRL)],
         @[@"Alt+Tab", @(BUREAU_VK_TAB), @(MODIFIER_ALT)], @[@"Bureau", @('D'), @(MODIFIER_META)],
         @[@"Fermer", @(0x73), @(MODIFIER_ALT)], @[@"Gestionnaire", @(0x1B), @(MODIFIER_CTRL | MODIFIER_SHIFT)],
     ];
-    NSMutableArray *chips = [NSMutableArray array];
+    UIStackView *keysStack = [[UIStackView alloc] init];
+    keysStack.axis = UILayoutConstraintAxisHorizontal;
+    keysStack.spacing = 2;
+    keysStack.translatesAutoresizingMaskIntoConstraints = NO;
     for (NSArray *key in keys) {
-        UIButton *chip = [self bureauChip:key[0] action:@selector(bureauKeyButton:)];
-        chip.tag = ([key[1] intValue] & 0xFF) | ([key[2] intValue] << 8);
-        [chips addObject:chip];
+        UIButton *b = [self bureauButtonWithSymbol:nil title:key[0] action:@selector(bureauKeyButton:)];
+        b.tag = ([key[1] intValue] & 0xFF) | ([key[2] intValue] << 8);
+        [keysStack addArrangedSubview:b];
     }
-    _bureauKeyChips = chips;
-
-    _bureauTilesBox = [[UIStackView alloc] init];
-    _bureauTilesBox.axis = UILayoutConstraintAxisVertical;
-    _bureauTilesBox.spacing = 8;
-    _bureauKeysRow = [[UIStackView alloc] init];
-    _bureauKeysRow.axis = UILayoutConstraintAxisVertical;
-    _bureauKeysRow.spacing = 6;
+    _bureauKeysRow = [[UIScrollView alloc] init];
+    _bureauKeysRow.showsHorizontalScrollIndicator = NO;
     _bureauKeysRow.hidden = YES;
-
-    UIStackView *content = [[UIStackView alloc] initWithArrangedSubviews:@[header, _bureauTilesBox, _bureauKeysRow]];
-    content.axis = UILayoutConstraintAxisVertical;
-    content.spacing = 12;
-    content.translatesAutoresizingMaskIntoConstraints = NO;
-    [_bureauBar.contentView addSubview:content];
-    NSLayoutConstraint *maxWidth = [_bureauBar.widthAnchor constraintEqualToConstant:560];
-    maxWidth.priority = UILayoutPriorityDefaultHigh;
+    [_bureauKeysRow addSubview:keysStack];
     [NSLayoutConstraint activateConstraints:@[
-        [content.topAnchor constraintEqualToAnchor:_bureauBar.contentView.topAnchor constant:14],
-        [content.bottomAnchor constraintEqualToAnchor:_bureauBar.contentView.bottomAnchor constant:-14],
-        [content.leadingAnchor constraintEqualToAnchor:_bureauBar.contentView.leadingAnchor constant:14],
-        [content.trailingAnchor constraintEqualToAnchor:_bureauBar.contentView.trailingAnchor constant:-14],
+        [keysStack.leadingAnchor constraintEqualToAnchor:_bureauKeysRow.contentLayoutGuide.leadingAnchor],
+        [keysStack.trailingAnchor constraintEqualToAnchor:_bureauKeysRow.contentLayoutGuide.trailingAnchor],
+        [keysStack.topAnchor constraintEqualToAnchor:_bureauKeysRow.contentLayoutGuide.topAnchor],
+        [keysStack.bottomAnchor constraintEqualToAnchor:_bureauKeysRow.contentLayoutGuide.bottomAnchor],
+        [keysStack.heightAnchor constraintEqualToAnchor:_bureauKeysRow.frameLayoutGuide.heightAnchor],
+        [_bureauKeysRow.heightAnchor constraintEqualToConstant:40],
+    ]];
+
+    UIStackView *rows = [[UIStackView alloc] initWithArrangedSubviews:@[mainRow, _bureauKeysRow]];
+    rows.axis = UILayoutConstraintAxisVertical;
+    rows.alignment = UIStackViewAlignmentCenter;
+    rows.spacing = 4;
+    rows.translatesAutoresizingMaskIntoConstraints = NO;
+    [_bureauBar.contentView addSubview:rows];
+    [NSLayoutConstraint activateConstraints:@[
+        [rows.topAnchor constraintEqualToAnchor:_bureauBar.contentView.topAnchor constant:4],
+        [rows.bottomAnchor constraintEqualToAnchor:_bureauBar.contentView.bottomAnchor constant:-4],
+        [rows.leadingAnchor constraintEqualToAnchor:_bureauBar.contentView.leadingAnchor constant:6],
+        [rows.trailingAnchor constraintEqualToAnchor:_bureauBar.contentView.trailingAnchor constant:-6],
+        [_bureauKeysRow.widthAnchor constraintEqualToAnchor:rows.widthAnchor],
         [_bureauBar.topAnchor constraintEqualToAnchor:safe.topAnchor constant:6],
         [_bureauBar.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
         [_bureauBar.widthAnchor constraintLessThanOrEqualToAnchor:safe.widthAnchor constant:-16],
-        maxWidth,
     ]];
 
-    // Handle: always visible, small and translucent, shows/hides the panel
+    // Handle: always visible, small and translucent, shows/hides the toolbar
     _bureauHandle = [UIButton buttonWithType:UIButtonTypeSystem];
     _bureauHandle.translatesAutoresizingMaskIntoConstraints = NO;
     _bureauHandle.backgroundColor = [UIColor colorWithWhite:0 alpha:0.35];
     _bureauHandle.tintColor = [UIColor colorWithWhite:1 alpha:0.85];
     _bureauHandle.layer.cornerRadius = 12;
-    _bureauHandle.accessibilityLabel = @"Menu";
+    _bureauHandle.accessibilityLabel = @"Barre d'outils";
     [_bureauHandle addTarget:self action:@selector(bureauToggleToolbar) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:_bureauHandle];
     [NSLayoutConstraint activateConstraints:@[
-        [_bureauHandle.widthAnchor constraintEqualToConstant:52],
+        [_bureauHandle.widthAnchor constraintEqualToConstant:48],
         [_bureauHandle.heightAnchor constraintEqualToConstant:24],
         [_bureauHandle.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
     ]];
+    // Two positions: under the toolbar when it is shown, at the top otherwise
     NSLayoutConstraint *handleTop = [_bureauHandle.topAnchor constraintEqualToAnchor:safe.topAnchor constant:2];
     handleTop.priority = UILayoutPriorityDefaultHigh;
     handleTop.active = YES;
+
+    // Data used: a small pill under the handle, shown with the toolbar when chosen
+    _bureauDataPill = [[UIView alloc] init];
+    _bureauDataPill.translatesAutoresizingMaskIntoConstraints = NO;
+    _bureauDataPill.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
+    _bureauDataPill.layer.cornerRadius = 10;
+    _bureauDataPill.userInteractionEnabled = NO;
+    _bureauDataPill.hidden = YES;
+    _bureauDataLabel = [[UILabel alloc] init];
+    _bureauDataLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _bureauDataLabel.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightMedium];
+    _bureauDataLabel.textColor = UIColor.whiteColor;
+    _bureauDataLabel.numberOfLines = 0;
+    _bureauDataLabel.textAlignment = NSTextAlignmentCenter;
+    [_bureauDataPill addSubview:_bureauDataLabel];
+    [self.view addSubview:_bureauDataPill];
+    [NSLayoutConstraint activateConstraints:@[
+        [_bureauDataLabel.topAnchor constraintEqualToAnchor:_bureauDataPill.topAnchor constant:6],
+        [_bureauDataLabel.bottomAnchor constraintEqualToAnchor:_bureauDataPill.bottomAnchor constant:-6],
+        [_bureauDataLabel.leadingAnchor constraintEqualToAnchor:_bureauDataPill.leadingAnchor constant:10],
+        [_bureauDataLabel.trailingAnchor constraintEqualToAnchor:_bureauDataPill.trailingAnchor constant:-10],
+        [_bureauDataPill.topAnchor constraintEqualToAnchor:_bureauHandle.bottomAnchor constant:6],
+        [_bureauDataPill.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
+        [_bureauDataPill.widthAnchor constraintLessThanOrEqualToAnchor:safe.widthAnchor constant:-16],
+    ]];
     [self bureauUpdateHandle];
 
     // Phone-side mute, remembered between sessions
     BureauSetAudioMuted([[NSUserDefaults standardUserDefaults] boolForKey:BUREAU_MUTED_KEY]);
     [self bureauRefreshMuteTile];
 
-    // Data counter: saved every 15 s and when the stream closes
-    [self bureauFlushDataUsage]; // first reading = starting point of this session
+    // Data counter: first reading = starting point, then saved every 15 s and at the end
+    [self bureauFlushDataUsage];
     _bureauDataTimer = [NSTimer scheduledTimerWithTimeInterval:15 target:self selector:@selector(bureauFlushDataUsage) userInfo:nil repeats:YES];
+    [self bureauRefreshDataShown];
 
     // Two-finger drag = mouse wheel (vertical and horizontal), measured on screen
     UIPanGestureRecognizer *wheel = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(bureauWheel:)];
@@ -1146,89 +1159,18 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
 
     [self setupBureauComposer];
     [self bureauApplyOrientationLock];
-    [self bureauLayoutGrid];
 }
 
-#pragma mark Menu building blocks
-
-- (UIButton *)bureauTile:(NSString *)symbol title:(NSString *)title color:(UIColor *)color action:(SEL)action {
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
-    [self bureauSetTile:button symbol:symbol title:title color:color];
-    [button.heightAnchor constraintEqualToConstant:66].active = YES;
+- (UIButton *)bureauDisconnectButton {
+    UIButton *button = [self bureauButtonWithSymbol:@"xmark.circle.fill" title:@"Déconnecter" action:@selector(bureauDisconnect)];
+    button.tintColor = UIColor.systemRedColor;
     return button;
 }
 
-- (void)bureauSetTile:(UIButton *)button symbol:(NSString *)symbol title:(NSString *)title color:(UIColor *)color {
-    UIButtonConfiguration *c = [UIButtonConfiguration filledButtonConfiguration];
-    c.image = [UIImage systemImageNamed:symbol withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:19 weight:UIImageSymbolWeightSemibold]];
-    c.imagePlacement = NSDirectionalRectEdgeTop;
-    c.imagePadding = 6;
-    c.baseBackgroundColor = [color colorWithAlphaComponent:0.24];
-    c.baseForegroundColor = color;
-    c.cornerStyle = UIButtonConfigurationCornerStyleLarge;
-    c.contentInsets = NSDirectionalEdgeInsetsMake(8, 2, 8, 2);
-    c.attributedTitle = [[NSAttributedString alloc] initWithString:title attributes:@{
-        NSFontAttributeName: [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold],
-        NSForegroundColorAttributeName: UIColor.whiteColor,
-    }];
-    c.titleLineBreakMode = NSLineBreakByTruncatingTail;
-    button.configuration = c;
-    button.accessibilityLabel = title;
-}
-
-- (UIButton *)bureauChip:(NSString *)title action:(SEL)action {
-    UIButtonConfiguration *c = [UIButtonConfiguration grayButtonConfiguration];
-    c.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
-    c.baseForegroundColor = UIColor.whiteColor;
-    c.contentInsets = NSDirectionalEdgeInsetsMake(6, 8, 6, 8);
-    c.attributedTitle = [[NSAttributedString alloc] initWithString:title attributes:@{
-        NSFontAttributeName: [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold],
-    }];
-    UIButton *button = [UIButton buttonWithConfiguration:c primaryAction:nil];
-    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
-    [button.heightAnchor constraintEqualToConstant:36].active = YES;
-    return button;
-}
-
-// Lays the tiles and chips out in rows that fit the panel width (portrait: 4 tiles per row,
-// landscape: 8). Rebuilt when the width changes.
-- (void)bureauLayoutGrid {
-    if (_bureauTilesBox == nil) {
-        return;
-    }
-    CGFloat available = MIN(self.view.safeAreaLayoutGuide.layoutFrame.size.width - 16, 560) - 28;
-    if (fabs(available - _bureauGridWidth) < 1) {
-        return;
-    }
-    _bureauGridWidth = available;
-    NSInteger tileColumns = available >= 8 * 58 ? 8 : 4;
-    NSInteger chipColumns = MAX(3, MIN(6, (NSInteger)floor(available / 84)));
-    [self bureauFill:_bureauTilesBox with:_bureauTiles columns:tileColumns spacing:8];
-    [self bureauFill:_bureauKeysRow with:_bureauKeyChips columns:chipColumns spacing:6];
-}
-
-- (void)bureauFill:(UIStackView *)box with:(NSArray<UIButton *> *)items columns:(NSInteger)columns spacing:(CGFloat)spacing {
-    for (UIView *row in [box.arrangedSubviews copy]) {
-        [box removeArrangedSubview:row];
-        [row removeFromSuperview];
-    }
-    for (NSInteger i = 0; i < (NSInteger)items.count; i += columns) {
-        NSMutableArray *rowItems = [NSMutableArray array];
-        for (NSInteger j = i; j < i + columns; j++) {
-            if (j < (NSInteger)items.count) {
-                [items[j] removeFromSuperview];
-                [rowItems addObject:items[j]];
-            } else {
-                [rowItems addObject:[[UIView alloc] init]]; // keeps every column the same width
-            }
-        }
-        UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:rowItems];
-        row.axis = UILayoutConstraintAxisHorizontal;
-        row.distribution = UIStackViewDistributionFillEqually;
-        row.spacing = spacing;
-        [box addArrangedSubview:row];
-    }
+- (void)bureauSetIcon:(UIButton *)button symbol:(NSString *)symbol tint:(UIColor *)tint {
+    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightMedium];
+    [button setImage:[UIImage systemImageNamed:symbol withConfiguration:config] forState:UIControlStateNormal];
+    button.tintColor = tint;
 }
 
 #pragma mark Mute (phone only)
@@ -1243,10 +1185,9 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
 
 - (void)bureauRefreshMuteTile {
     BOOL muted = [[NSUserDefaults standardUserDefaults] boolForKey:BUREAU_MUTED_KEY];
-    [self bureauSetTile:_bureauMuteButton
-                 symbol:(muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill")
-                  title:(muted ? @"Son coupé" : @"Son")
-                  color:(muted ? UIColor.systemRedColor : UIColor.systemGreenColor)];
+    [self bureauSetIcon:_bureauMuteButton symbol:(muted ? @"speaker.slash.fill" : @"speaker.wave.2")
+                   tint:(muted ? UIColor.systemRedColor : UIColor.whiteColor)];
+    _bureauMuteButton.accessibilityLabel = muted ? @"Remettre le son sur l'iPhone" : @"Couper le son sur l'iPhone";
 }
 
 #pragma mark Data used
@@ -1350,16 +1291,17 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
 }
 
 - (void)bureauRefreshDataShown {
-    BOOL shown = [[NSUserDefaults standardUserDefaults] boolForKey:BUREAU_SHOW_DATA_KEY];
-    _bureauDataLabel.hidden = !shown;
-    if (shown) {
+    BOOL wanted = [[NSUserDefaults standardUserDefaults] boolForKey:BUREAU_SHOW_DATA_KEY];
+    if (wanted && !_bureauBar.hidden) {
         _bureauDataLabel.text = [self bureauDataSummary];
+        _bureauDataPill.hidden = NO;
+        [self.view bringSubviewToFront:_bureauDataPill];
+    } else {
+        _bureauDataPill.hidden = YES;
     }
-    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:14 weight:UIImageSymbolWeightSemibold];
-    [_bureauDataButton setImage:[UIImage systemImageNamed:(shown ? @"chart.bar.fill" : @"chart.bar") withConfiguration:config]
-                       forState:UIControlStateNormal];
-    _bureauDataButton.tintColor = shown ? UIColor.systemCyanColor : [UIColor colorWithWhite:1 alpha:0.5];
-    _bureauDataButton.accessibilityLabel = shown ? @"Masquer les données consommées" : @"Afficher les données consommées";
+    [self bureauSetIcon:_bureauDataButton symbol:(wanted ? @"chart.bar.fill" : @"chart.bar")
+                   tint:(wanted ? UIColor.systemCyanColor : UIColor.whiteColor)];
+    _bureauDataButton.accessibilityLabel = wanted ? @"Masquer les données consommées" : @"Afficher les données consommées";
 }
 
 #pragma mark Two-finger wheel
@@ -1368,26 +1310,68 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
     return YES;
 }
 
+static CGFloat BureauTouchDistance(UIGestureRecognizer *g) {
+    if (g.numberOfTouches < 2) {
+        return 0;
+    }
+    CGPoint a = [g locationOfTouch:0 inView:nil];
+    CGPoint b = [g locationOfTouch:1 inView:nil];
+    return hypot(a.x - b.x, a.y - b.y);
+}
+
 - (void)bureauWheel:(UIPanGestureRecognizer *)pan {
-    // A pinch in progress zooms; it does not scroll
-    UIGestureRecognizerState pinch = _scrollView.pinchGestureRecognizer.state;
-    if (pinch == UIGestureRecognizerStateBegan || pinch == UIGestureRecognizerStateChanged) {
+    if (pan.state == UIGestureRecognizerStateBegan) {
+        _bureauWheelMode = 0;
+        _bureauWheelStartDistance = BureauTouchDistance(pan);
+        _bureauWheelStartZoom = _scrollView.zoomScale;
+        _bureauWheelTravel = CGPointZero;
         [pan setTranslation:CGPointZero inView:nil];
         return;
     }
     if (pan.state != UIGestureRecognizerStateChanged) {
+        if (_bureauWheelMode == 1) {
+            _scrollView.pinchGestureRecognizer.enabled = YES;
+        }
+        _bureauWheelMode = 0;
         return;
     }
     CGPoint t = [pan translationInView:nil];
     [pan setTranslation:CGPointZero inView:nil];
-    // Content follows the fingers, like scrolling on iOS (120 = one wheel notch per ~12 points)
-    short vertical = (short)MAX(MIN(t.y * 10, 32767), -32767);
-    short horizontal = (short)MAX(MIN(-t.x * 10, 32767), -32767);
-    if (vertical != 0 && fabs(t.y) >= fabs(t.x)) {
-        LiSendHighResScrollEvent(vertical);
+
+    if (_bureauWheelMode == 0) {
+        _bureauWheelTravel.x += t.x;
+        _bureauWheelTravel.y += t.y;
+        CGFloat travel = hypot(_bureauWheelTravel.x, _bureauWheelTravel.y);
+        CGFloat spread = fabs(BureauTouchDistance(pan) - _bureauWheelStartDistance);
+        if (spread > 24 && spread > travel) {
+            _bureauWheelMode = 2; // fingers move apart/together: zoom, handled by the scroll view
+        } else if (travel > 10 && travel > spread * 2) {
+            // Fingers move together: wheel. Stop the pinch and undo its small zoom.
+            _bureauWheelMode = 1;
+            _scrollView.pinchGestureRecognizer.enabled = NO;
+            if (fabs(_scrollView.zoomScale - _bureauWheelStartZoom) > 0.001) {
+                [_scrollView setZoomScale:_bureauWheelStartZoom animated:NO];
+                [self bureauCenterOnCursor];
+            }
+            t = _bureauWheelTravel;
+        } else {
+            return;
+        }
     }
-    if (horizontal != 0 && fabs(t.x) > fabs(t.y)) {
-        LiSendHighResHScrollEvent(horizontal);
+    if (_bureauWheelMode != 1) {
+        return;
+    }
+    // Content follows the fingers, like scrolling on iOS (120 = one wheel notch per ~12 points)
+    if (fabs(t.y) >= fabs(t.x)) {
+        short vertical = (short)MAX(MIN(t.y * 10, 32767), -32767);
+        if (vertical != 0) {
+            LiSendHighResScrollEvent(vertical);
+        }
+    } else {
+        short horizontal = (short)MAX(MIN(-t.x * 10, 32767), -32767);
+        if (horizontal != 0) {
+            LiSendHighResHScrollEvent(horizontal);
+        }
     }
 }
 
@@ -1473,13 +1457,8 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
 }
 
 - (void)bureauSetToolbarShown:(BOOL)shown {
-    if (shown) {
-        if (!_bureauDataLabel.hidden) {
-            _bureauDataLabel.text = [self bureauDataSummary];
-        }
-        [self bureauLayoutGrid];
-    }
     _bureauBar.hidden = !shown;
+    [self bureauRefreshDataShown];
     if (!shown) {
         _bureauKeysRow.hidden = YES;
     }
@@ -1510,9 +1489,8 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
 
 - (void)bureauTogglePin {
     _bureauPinned = !_bureauPinned;
-    [self bureauSetTile:_bureauPinButton symbol:(_bureauPinned ? @"pin.fill" : @"pin")
-                  title:(_bureauPinned ? @"Épinglé" : @"Épingler")
-                  color:(_bureauPinned ? UIColor.systemYellowColor : UIColor.systemGrayColor)];
+    [self bureauSetIcon:_bureauPinButton symbol:(_bureauPinned ? @"pin.fill" : @"pin")
+                   tint:(_bureauPinned ? UIColor.systemYellowColor : UIColor.whiteColor)];
     [self bureauRestartHideTimer];
 }
 
