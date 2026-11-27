@@ -885,6 +885,9 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
 
 #if !TARGET_OS_TV
 // Require a confirmation when streaming to activate a system gesture
+// All edges: a swipe from an edge (home at the bottom, notifications at the top) first goes to
+// the PC as a mouse move; the system gesture needs a second swipe. Moonlight Bureau: this only
+// works since the navigation and reveal controllers forward it to this screen (end of file).
 - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures {
     return UIRectEdgeAll;
 }
@@ -955,18 +958,6 @@ static NSString *const BUREAU_ORIENTATION_LOCK_KEY = @"MoonlightBureauOrientatio
     [coordinator animateAlongsideTransition:nil completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
         [self bureauFitStreamView];
     }];
-}
-
-// Moonlight Bureau: during a session, the swipe up from the bottom edge (home) and down from
-// the top edge (notifications, Control Center) first go to the PC, as a mouse move. The system
-// gesture needs a second swipe while the indicator is shown, like in games
-// (preferredScreenEdgesDeferringSystemGestures). The home indicator is hidden.
-- (UIRectEdge)preferredScreenEdgesDeferringSystemGestures {
-    return UIRectEdgeBottom | UIRectEdgeTop;
-}
-
-- (BOOL)prefersHomeIndicatorAutoHidden {
-    return YES;
 }
 
 - (void)viewDidLayoutSubviews {
