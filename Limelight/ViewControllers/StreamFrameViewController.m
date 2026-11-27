@@ -250,6 +250,13 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
     if (_settings.absoluteTouchMode || !TARGET_OS_TV) {
         _scrollView = [[UIScrollView alloc] initWithFrame:self.view.frame];
 #if !TARGET_OS_TV
+        // Moonlight Bureau: no automatic insets for the notch / home bar. They differ between
+        // portrait and landscape and shifted the image (with some play) after each rotation.
+        // The only inset is ours, for the keyboard (bureauUpdateKeyboardOverlap).
+        _scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+        _scrollView.bounces = NO;
+        _scrollView.alwaysBounceVertical = NO;
+        _scrollView.alwaysBounceHorizontal = NO;
         [_scrollView.panGestureRecognizer setMinimumNumberOfTouches:2];
         if (!_settings.absoluteTouchMode) {
             _scrollView.panGestureRecognizer.enabled = NO;
@@ -1007,11 +1014,19 @@ static NSString *const BUREAU_ORIENTATION_LOCK_KEY = @"MoonlightBureauOrientatio
         _streamView.frame = self.view.bounds;
         return;
     }
-    _scrollView.frame = self.view.bounds;
-    if (_scrollView.zoomScale <= 1.001f && !CGRectEqualToRect(_streamView.frame, _scrollView.bounds)) {
-        _streamView.frame = CGRectMake(0, 0, _scrollView.bounds.size.width, _scrollView.bounds.size.height);
-        _scrollView.contentSize = _scrollView.bounds.size;
+    if (!CGRectEqualToRect(_scrollView.frame, self.view.bounds)) {
+        _scrollView.frame = self.view.bounds;
+    }
+    CGSize size = _scrollView.bounds.size;
+    if (_scrollView.zoomScale <= 1.001f &&
+        (!CGSizeEqualToSize(_streamView.frame.size, size) || !CGSizeEqualToSize(_scrollView.contentSize, size))) {
+        // New size (rotation): whole desktop on screen, no leftover offset from the other
+        // orientation, then follow the cursor again if the keyboard covers part of it
+        _streamView.frame = CGRectMake(0, 0, size.width, size.height);
+        _scrollView.contentSize = size;
+        _scrollView.contentOffset = CGPointZero;
         [_streamView setNeedsLayout];
+        [self bureauCenterOnCursor];
     }
 }
 
