@@ -70,7 +70,7 @@ static NSMutableSet* hostList;
     // failure callback could be invoked.
     dispatch_sync(dispatch_get_main_queue(), ^{
         self->_pairAlert = [UIAlertController alertControllerWithTitle:@"Appairage"
-                                                               message:[NSString stringWithFormat:@"Enter the following PIN on the host machine: %@\n\nIf your host PC is running Sunshine, navigate to the Sunshine web UI to enter the PIN.", PIN]
+                                                               message:[NSString stringWithFormat:@"Code à saisir sur le PC : %@\n\nAvec Sunshine : dans son interface web (page PIN), ou par l'agent sur le PC.", PIN]
                                                         preferredStyle:UIAlertControllerStyleAlert];
         [self->_pairAlert addAction:[UIAlertAction actionWithTitle:@"Annuler" style:UIAlertActionStyleDestructive handler:^(UIAlertAction* action) {
             self->_pairAlert = nil;
@@ -1251,6 +1251,10 @@ static NSString *const BUREAU_RESUME_KEY = @"MoonlightBureauResumeAt";
     [CATransaction setDisableActions:YES];
     _bureauBackground.frame = self.collectionView.backgroundView.bounds.size.width > 0 ? self.collectionView.backgroundView.bounds : self.view.bounds;
     [CATransaction commit];
+
+    // Settings panel: 510 pt in landscape, but never wider than the screen minus a strip
+    // that keeps the gear button visible (portrait iPhone is 430 pt wide)
+    self.revealViewController.rearViewRevealWidth = MIN(510, self.view.bounds.size.width - 56);
 
     CGRect area = self.collectionView.safeAreaLayoutGuide.layoutFrame;
     if (!CGRectEqualToRect(hostScrollView.frame, area)) {

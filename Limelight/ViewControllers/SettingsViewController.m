@@ -7,6 +7,7 @@
 //
 
 #import "SettingsViewController.h"
+#import <objc/runtime.h>
 #import "TemporarySettings.h"
 #import "DataManager.h"
 
@@ -23,7 +24,7 @@
 
 @dynamic overrideUserInterfaceStyle;
 
-static NSString* bitrateFormat = @"Bitrate: %.1f Mbps";
+static NSString* bitrateFormat = @"Débit : %.1f Mb/s";
 static const int bitrateTable[] = {
     500,
     1000,
@@ -73,6 +74,9 @@ CGSize resolutionTable[RESOLUTION_TABLE_SIZE];
 // This view is rooted at a ScrollView. To make it scrollable,
 // we'll update content size here.
 -(void)viewDidLayoutSubviews {
+#if !TARGET_OS_TV
+    [self bureauFitWidth];
+#endif
     CGFloat highestViewY = 0;
     
     // Enumerate the scroll view's subviews looking for the
@@ -144,6 +148,46 @@ CGSize resolutionTable[RESOLUTION_TABLE_SIZE];
 }
 
 #if !TARGET_OS_TV
+// Moonlight Bureau: the storyboard places the settings at fixed widths (450 pt) made for a
+// landscape panel of 510 pt. In portrait the panel is narrower than that: every control is
+// narrowed to the visible width, with a smaller font in the segmented controls when needed.
+- (void) bureauFitWidth {
+    CGFloat visible = self.scrollView.bounds.size.width;
+    if (self.revealViewController != nil) {
+        visible = MIN(visible, self.revealViewController.rearViewRevealWidth);
+    }
+    if (visible < 100) {
+        return;
+    }
+    for (UIView *v in self.scrollView.subviews) {
+        if (v.tag == 4242 || [v isKindOfClass:[UIImageView class]]) {
+            continue;
+        }
+        NSNumber *original = objc_getAssociatedObject(v, @selector(bureauFitWidth));
+        if (original == nil) {
+            original = @(v.frame.size.width);
+            objc_setAssociatedObject(v, @selector(bureauFitWidth), original, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        CGFloat width = MIN(original.doubleValue, visible - v.frame.origin.x - 16);
+        if (fabs(width - v.frame.size.width) > 0.5) {
+            CGRect f = v.frame;
+            f.size.width = MAX(width, 60);
+            v.frame = f;
+        }
+        if ([v isKindOfClass:[UILabel class]]) {
+            ((UILabel *)v).adjustsFontSizeToFitWidth = YES;
+            ((UILabel *)v).minimumScaleFactor = 0.7;
+        }
+        if ([v isKindOfClass:[UISegmentedControl class]]) {
+            UISegmentedControl *seg = (UISegmentedControl *)v;
+            BOOL narrow = width < original.doubleValue - 1;
+            [seg setTitleTextAttributes:@{NSFontAttributeName: [UIFont systemFontOfSize:(narrow ? 11 : 13) weight:UIFontWeightMedium]}
+                               forState:UIControlStateNormal];
+            seg.apportionsSegmentWidthsByContent = YES;
+        }
+    }
+}
+
 - (void) bureauQuitSwitchChanged {
     [[NSUserDefaults standardUserDefaults] setBool:_bureauQuitSwitch.on forKey:@"MoonlightBureauQuitOnKill"];
 }
@@ -327,7 +371,7 @@ BOOL isCustomResolution(CGSize res) {
     
     if (!VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC) || !(AVPlayer.availableHDRModes & AVPlayerHDRModeHDR10)) {
         [self.hdrSelector removeAllSegments];
-        [self.hdrSelector insertSegmentWithTitle:@"Unsupported on this device" atIndex:0 animated:NO];
+        [self.hdrSelector insertSegmentWithTitle:@"Non pris en charge sur cet appareil" atIndex:0 animated:NO];
         [self.hdrSelector setEnabled:NO];
     }
     else {
@@ -439,10 +483,10 @@ BOOL isCustomResolution(CGSize res) {
 }
 
 - (void) promptCustomResolutionDialog {
-    UIAlertController *alertController = [UIAlertController alertControllerWithTitle:@"Enter Custom Resolution" message:nil preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *alertController = [UIAlertController alertControllerWithTitle:@"Définition personnalisée" message:nil preferredStyle:UIAlertControllerStyleAlert];
 
     [alertController addTextFieldWithConfigurationHandler:^(UITextField *textField) {
-        textField.placeholder = @"Video Width";
+        textField.placeholder = @"Largeur";
         textField.clearButtonMode = UITextFieldViewModeAlways;
         textField.borderStyle = UITextBorderStyleRoundedRect;
         textField.keyboardType = UIKeyboardTypeNumberPad;
@@ -456,7 +500,7 @@ BOOL isCustomResolution(CGSize res) {
     }];
 
     [alertController addTextFieldWithConfigurationHandler:^(UITextField *textField) {
-        textField.placeholder = @"Video Height";
+        textField.placeholder = @"Hauteur";
         textField.clearButtonMode = UITextFieldViewModeAlways;
         textField.borderStyle = UITextBorderStyleRoundedRect;
         textField.keyboardType = UIKeyboardTypeNumberPad;
@@ -504,12 +548,14 @@ BOOL isCustomResolution(CGSize res) {
         [self updateResolutionDisplayViewText];
         self->_lastSelectedResolutionIndex = [self.resolutionSelector selectedSegmentIndex];
         
-        UIAlertController *alertController = [UIAlertController alertControllerWithTitle:@"Custom Resolution Selected" message: @"Custom resolutions are not officially supported by GeForce Experience, so it will not set your host display resolution. You will need to set it manually while in game.\n\nResolutions that are not supported by your client or host PC may cause streaming errors." preferredStyle:UIAlertControllerStyleAlert];
+        UIAlertController *alertController = [UIAlertController alertControllerWithTitle:@"Définition personnalisée" message: @"Le PC ne change pas sa définition pour une définition personnalisée : à régler sur le PC.
+
+Une définition que le PC ou le téléphone ne gère pas peut provoquer des erreurs." preferredStyle:UIAlertControllerStyleAlert];
         [alertController addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
         [self presentViewController:alertController animated:YES completion:nil];
     }]];
 
-    [alertController addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
+    [alertController addAction:[UIAlertAction actionWithTitle:@"Annuler" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
         // Restore the previous selection
         [self.resolutionSelector setSelectedSegmentIndex:self->_lastSelectedResolutionIndex];
     }]];
@@ -536,7 +582,7 @@ BOOL isCustomResolution(CGSize res) {
         [subview removeFromSuperview];
     }
     UILabel *label1 = [[UILabel alloc] init];
-    label1.text = @"Set PC/Game resolution: ";
+    label1.text = @"Définition du PC ou du jeu : ";
     label1.font = [UIFont systemFontOfSize:fontSize];
     [label1 sizeToFit];
     label1.frame = CGRectMake(padding, (viewFrameHeight - label1.frame.size.height) / 2, label1.frame.size.width, label1.frame.size.height);

@@ -627,8 +627,8 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
         NSString* message;
         
         if (portTestResults != ML_TEST_RESULT_INCONCLUSIVE && portTestResults != 0) {
-            title = @"Connection Error";
-            message = @"Your device's network connection is blocking Moonlight. Streaming may not work while connected to this network.";
+            title = @"Erreur de connexion";
+            message = @"Le réseau du téléphone bloque Moonlight : la session risque de ne pas marcher sur ce réseau.";
         }
         else {
             switch (errorCode) {
@@ -637,29 +637,29 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
                     return;
                     
                 case ML_ERROR_NO_VIDEO_TRAFFIC:
-                    title = @"Connection Error";
-                    message = @"No video received from host.";
+                    title = @"Erreur de connexion";
+                    message = @"Aucune image reçue du PC.";
                     if (portFlags != 0) {
                         char failingPorts[256];
                         LiStringifyPortFlags(portFlags, "\n", failingPorts, sizeof(failingPorts));
-                        message = [message stringByAppendingString:[NSString stringWithFormat:@"\n\nCheck your firewall and port forwarding rules for port(s):\n%s", failingPorts]];
+                        message = [message stringByAppendingString:[NSString stringWithFormat:@"\n\nPorts à vérifier (pare-feu, Tailscale) :\n%s", failingPorts]];
                     }
                     break;
                     
                 case ML_ERROR_NO_VIDEO_FRAME:
-                    title = @"Connection Error";
-                    message = @"Your network connection isn't performing well. Reduce your video bitrate setting or try a faster connection.";
+                    title = @"Erreur de connexion";
+                    message = @"La connexion est trop faible. Baisser le débit dans les réglages ou changer de réseau.";
                     break;
                     
                 case ML_ERROR_UNEXPECTED_EARLY_TERMINATION:
                 case ML_ERROR_PROTECTED_CONTENT:
-                    title = @"Connection Error";
-                    message = @"Something went wrong on your host PC when starting the stream.\n\nMake sure you don't have any DRM-protected content open on your host PC. You can also try restarting your host PC.\n\nIf the issue persists, try reinstalling your GPU drivers and GeForce Experience.";
+                    title = @"Erreur de connexion";
+                    message = @"Le PC n'a pas pu démarrer la session. Fermer un contenu protégé (DRM) ouvert sur le PC, ou redémarrer le PC.";
                     break;
                     
                 case ML_ERROR_FRAME_CONVERSION:
-                    title = @"Connection Error";
-                    message = @"The host PC reported a fatal video encoding error.\n\nTry disabling HDR mode, changing the streaming resolution, or changing your host PC's display resolution.";
+                    title = @"Erreur de connexion";
+                    message = @"Le PC n'arrive plus à encoder l'image. Essayer une autre définition ou désactiver le HDR.";
                     break;
                     
                 default:
@@ -674,8 +674,8 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
                         errorString = [NSString stringWithFormat:@"%d", errorCode];
                     }
                     
-                    title = @"Connection Terminated";
-                    message = [NSString stringWithFormat: @"The connection was terminated\n\nError code: %@", errorString];
+                    title = @"Connexion interrompue";
+                    message = [NSString stringWithFormat: @"La connexion a été coupée.\n\nCode d'erreur : %@", errorString];
                     break;
                 }
             }
@@ -723,13 +723,13 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
         if (portTestFlags != 0) {
             char failingPorts[256];
             LiStringifyPortFlags(portTestFlags, "\n", failingPorts, sizeof(failingPorts));
-            message = [message stringByAppendingString:[NSString stringWithFormat:@"\n\nCheck your firewall and port forwarding rules for port(s):\n%s", failingPorts]];
+            message = [message stringByAppendingString:[NSString stringWithFormat:@"\n\nPorts à vérifier (pare-feu, Tailscale) :\n%s", failingPorts]];
         }
         if (portTestResults != ML_TEST_RESULT_INCONCLUSIVE && portTestResults != 0) {
-            message = [message stringByAppendingString:@"\n\nYour device's network connection is blocking Moonlight. Streaming may not work while connected to this network."];
+            message = [message stringByAppendingString:@"\n\nLe réseau du téléphone bloque Moonlight : la session risque de ne pas marcher sur ce réseau."];
         }
         
-        UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"Connection Failed"
+        UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"Connexion impossible"
                                                                        message:message
                                                                 preferredStyle:UIAlertControllerStyleAlert];
         [Utils addHelpOptionToDialog:alert];
@@ -749,7 +749,7 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
         // Allow the display to go to sleep now
         [UIApplication sharedApplication].idleTimerDisabled = NO;
         
-        UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"Connection Error"
+        UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"Erreur de connexion"
                                                                        message:message
                                                                 preferredStyle:UIAlertControllerStyleAlert];
         [Utils addHelpOptionToDialog:alert];
@@ -1575,7 +1575,7 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
         _bureauTextView.inlinePredictionType = UITextInlinePredictionTypeNo;
     }
     _bureauPlaceholder = [[UILabel alloc] init];
-    _bureauPlaceholder.text = @"Envoyer du texte (Retour = nouvelle ligne)";
+    _bureauPlaceholder.text = @"Texte à envoyer…";
     _bureauPlaceholder.textColor = [UIColor colorWithWhite:1 alpha:0.4];
     _bureauPlaceholder.font = [UIFont systemFontOfSize:17];
     _bureauPlaceholder.translatesAutoresizingMaskIntoConstraints = NO;
