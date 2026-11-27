@@ -59,6 +59,71 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
     return [super gestureRecognizerShouldBegin:gestureRecognizer];
 }
 @end
+
+// Direct typing, as Chrome Remote Desktop (remoting/ios/client_keyboard.mm): an invisible view
+// takes the iOS keyboard and every key goes to the PC at once. No text field, no correction,
+// no suggestion bar: the keyboard is as small as iOS makes it. The default keyboard type is
+// kept (accents, French layout) instead of their ASCII one.
+@interface BureauKeyInput : UIView <UIKeyInput>
+@property (nonatomic) UITextAutocorrectionType autocorrectionType;
+@property (nonatomic) UITextAutocapitalizationType autocapitalizationType;
+@property (nonatomic) UITextSpellCheckingType spellCheckingType;
+@property (nonatomic) UITextSmartQuotesType smartQuotesType;
+@property (nonatomic) UITextSmartDashesType smartDashesType;
+@property (nonatomic) UITextSmartInsertDeleteType smartInsertDeleteType;
+@property (nonatomic) UIKeyboardType keyboardType;
+@property (nonatomic) UIKeyboardAppearance keyboardAppearance;
+@property (nonatomic, strong) UIView *bureauAccessory;
+@property (nonatomic, copy) void (^onText)(NSString *text);
+@property (nonatomic, copy) void (^onBackspace)(void);
+@end
+
+@implementation BureauKeyInput
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        _autocorrectionType = UITextAutocorrectionTypeNo;
+        _autocapitalizationType = UITextAutocapitalizationTypeNone;
+        _spellCheckingType = UITextSpellCheckingTypeNo;
+        _smartQuotesType = UITextSmartQuotesTypeNo;
+        _smartDashesType = UITextSmartDashesTypeNo;
+        _smartInsertDeleteType = UITextSmartInsertDeleteTypeNo;
+        _keyboardType = UIKeyboardTypeDefault;
+        _keyboardAppearance = UIKeyboardAppearanceDark;
+    }
+    return self;
+}
+- (BOOL)canBecomeFirstResponder {
+    return YES;
+}
+// Always "has text", so the delete key always reaches the PC
+- (BOOL)hasText {
+    return YES;
+}
+- (void)insertText:(NSString *)text {
+    if (self.onText != nil) {
+        self.onText(text);
+    }
+}
+- (void)deleteBackward {
+    if (self.onBackspace != nil) {
+        self.onBackspace();
+    }
+}
+- (UIView *)inputAccessoryView {
+    return self.bureauAccessory;
+}
+@end
+
+// All keys and text leave in typing order (a concurrent queue could swap two fast keys)
+static dispatch_queue_t BureauInputQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("moonlight.bureau.input", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
+    });
+    return queue;
+}
 #endif
 
 @implementation StreamFrameViewController {
@@ -117,6 +182,12 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
     BOOL _bureauKeyboardShown;
     CGRect _bureauKeyboardFrame;    // in self.view coordinates, from the keyboard notifications
     UIButton *_bureauRotationButton;
+    BureauKeyInput *_bureauKeyInput;
+    UIButton *_bureauFab;
+    NSLayoutConstraint *_bureauFabLeft;
+    NSLayoutConstraint *_bureauFabRight;
+    UIView *_bureauPrivacyBlur;
+    UIView *_bureauDragRing;
 #endif
 }
 
@@ -418,10 +489,10 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
     _bureauCursor = [[notification.userInfo objectForKey:@"point"] CGPointValue];
     _bureauCursorKnown = YES;
     // As in Chrome Remote Desktop, the view stays still while two fingers scroll
-    if (_bureauWheelMode == 1) {
-        return;
+    if (_bureauWheelMode != 1) {
+        [self bureauCenterOnCursor];
     }
-    [self bureauCenterOnCursor];
+    [self bureauPlaceDragRing];
 }
 #endif
 
@@ -540,6 +611,7 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
 #if !TARGET_OS_TV
     // Moonlight Bureau: the session stays open while inactive or in the background
     // (see applicationDidEnterBackground:), no 60-second limit
+    [self bureauShowPrivacyBlur];
     if (YES) {
         return;
     }
@@ -572,6 +644,7 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification {
 #if !TARGET_OS_TV
+    [self bureauHidePrivacyBlur];
     if (_bureauInBackground) {
         _bureauInBackground = NO;
         _bureauForegroundAt = [NSDate date];
@@ -1022,7 +1095,6 @@ static NSString *const BUREAU_ORIENTATION_LOCK_KEY = @"MoonlightBureauOrientatio
     }
     [[NSUserDefaults standardUserDefaults] setInteger:(NSInteger)lock forKey:BUREAU_ORIENTATION_LOCK_KEY];
     [self bureauApplyOrientationLock];
-    [self bureauRestartHideTimer];
 }
 
 - (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
@@ -1047,12 +1119,32 @@ static NSString *const BUREAU_ORIENTATION_LOCK_KEY = @"MoonlightBureauOrientatio
     _bureauKeyboardShown = frame.size.height > 60 && CGRectGetMinY(frame) < self.view.bounds.size.height - 1
                            && CGRectGetMaxY(frame) >= self.view.bounds.size.height - 1;
     _bureauKeyboardFrame = frame;
-    [self bureauUpdateKeyboardOverlap];
+    [self bureauWithKeyboardAnimation:notification changes:^{
+        [self bureauUpdateKeyboardOverlap];
+    }];
+}
+
+// As Chrome Remote Desktop (host_view_controller.mm), the desktop slides with the keyboard
+// itself: same duration and curve, instead of jumping once the keyboard is in place
+- (void)bureauWithKeyboardAnimation:(NSNotification *)notification changes:(void (^)(void))changes {
+    double duration = [notification.userInfo[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
+    NSInteger curve = [notification.userInfo[UIKeyboardAnimationCurveUserInfoKey] integerValue];
+    if (duration <= 0) {
+        changes();
+        return;
+    }
+    [UIView animateWithDuration:duration
+                          delay:0
+                        options:((UIViewAnimationOptions)curve << 16) | UIViewAnimationOptionBeginFromCurrentState
+                     animations:changes
+                     completion:nil];
 }
 
 - (void)bureauKeyboardHidden:(NSNotification *)notification {
     _bureauKeyboardShown = NO;
-    [self bureauUpdateKeyboardOverlap];
+    [self bureauWithKeyboardAnimation:notification changes:^{
+        [self bureauUpdateKeyboardOverlap];
+    }];
 }
 
 // Part of the screen covered by the iOS keyboard and, when shown, the composer above it
@@ -1116,7 +1208,6 @@ static NSString *const BUREAU_ORIENTATION_LOCK_KEY = @"MoonlightBureauOrientatio
 // phone and sent as Unicode, so the PC keyboard layout and dead keys don't matter), common
 // keys and shortcuts, paste from the iPhone, zoom reset and disconnect.
 
-static const NSTimeInterval BUREAU_AUTOHIDE_SECONDS = 5.0;
 static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN = 0x0D,
                    BUREAU_VK_ESCAPE = 0x1B, BUREAU_VK_LEFT = 0x25, BUREAU_VK_UP = 0x26,
                    BUREAU_VK_RIGHT = 0x27, BUREAU_VK_DOWN = 0x28, BUREAU_VK_DELETE = 0x2E,
@@ -1144,128 +1235,48 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
 }
 
 - (void)setupBureauToolbar {
-    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
-
-    // Toolbar: blurred, rounded, top center
-    _bureauBar = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark]];
-    _bureauBar.translatesAutoresizingMaskIntoConstraints = NO;
-    _bureauBar.layer.cornerRadius = 14;
-    _bureauBar.clipsToBounds = YES;
-    _bureauBar.alpha = 0.92;
-    _bureauBar.hidden = YES;
-    [self.view addSubview:_bureauBar];
-
-    _bureauPinButton = [self bureauButtonWithSymbol:@"pin" title:@"Épingler" action:@selector(bureauTogglePin)];
-    _bureauMuteButton = [self bureauButtonWithSymbol:@"speaker.wave.2" title:@"Couper le son sur l'iPhone" action:@selector(bureauToggleMute)];
-    _bureauDataButton = [self bureauButtonWithSymbol:@"chart.bar" title:@"Données consommées" action:@selector(bureauToggleDataShown)];
-    NSArray<UIButton *> *mainButtons = @[
-        [self bureauButtonWithSymbol:@"keyboard" title:@"Clavier" action:@selector(bureauShowComposer)],
-        [self bureauButtonWithSymbol:@"command" title:@"Touches" action:@selector(bureauToggleKeys)],
-        [self bureauButtonWithSymbol:@"doc.on.clipboard" title:@"Coller depuis l'iPhone" action:@selector(bureauPasteFromPhone)],
-        [self bureauButtonWithSymbol:@"arrow.down.right.and.arrow.up.left" title:@"Zoom 100 %" action:@selector(bureauResetZoom)],
-        _bureauMuteButton,
-        _bureauDataButton,
-        (_bureauRotationButton = [self bureauButtonWithSymbol:@"lock.rotation.open" title:@"Verrouiller l'orientation" action:@selector(bureauToggleOrientationLock)]),
-        _bureauPinButton,
-        [self bureauDisconnectButton],
-    ];
-    UIStackView *mainRow = [[UIStackView alloc] initWithArrangedSubviews:mainButtons];
-    mainRow.axis = UILayoutConstraintAxisHorizontal;
-    mainRow.spacing = 0;
-
-    // Keys and shortcuts row (scrolls horizontally on narrow screens)
-    NSArray *keys = @[
-        @[@"Échap", @(BUREAU_VK_ESCAPE), @0], @[@"Tab", @(BUREAU_VK_TAB), @0], @[@"⊞", @(BUREAU_VK_LWIN), @0],
-        @[@"←", @(BUREAU_VK_LEFT), @0], @[@"↑", @(BUREAU_VK_UP), @0], @[@"↓", @(BUREAU_VK_DOWN), @0], @[@"→", @(BUREAU_VK_RIGHT), @0],
-        @[@"Entrée", @(BUREAU_VK_RETURN), @0], @[@"⌫", @(BUREAU_VK_BACK), @0], @[@"Suppr", @(BUREAU_VK_DELETE), @0],
-        @[@"Copier", @('C'), @(MODIFIER_CTRL)], @[@"Coller", @('V'), @(MODIFIER_CTRL)], @[@"Couper", @('X'), @(MODIFIER_CTRL)],
-        @[@"Annuler", @('Z'), @(MODIFIER_CTRL)], @[@"Tout", @('A'), @(MODIFIER_CTRL)], @[@"Rechercher", @('F'), @(MODIFIER_CTRL)],
-        @[@"Alt+Tab", @(BUREAU_VK_TAB), @(MODIFIER_ALT)], @[@"Bureau", @('D'), @(MODIFIER_META)],
-        @[@"Fermer", @(0x73), @(MODIFIER_ALT)], @[@"Gestionnaire", @(0x1B), @(MODIFIER_CTRL | MODIFIER_SHIFT)],
-    ];
-    UIStackView *keysStack = [[UIStackView alloc] init];
-    keysStack.axis = UILayoutConstraintAxisHorizontal;
-    keysStack.spacing = 2;
-    keysStack.translatesAutoresizingMaskIntoConstraints = NO;
-    for (NSArray *key in keys) {
-        UIButton *b = [self bureauButtonWithSymbol:nil title:key[0] action:@selector(bureauKeyButton:)];
-        b.tag = ([key[1] intValue] & 0xFF) | ([key[2] intValue] << 8);
-        [keysStack addArrangedSubview:b];
+    // Like Chrome Remote Desktop (remoting/ios/app/host_view_controller.mm): one small round
+    // button in a bottom corner, which rides above the keyboard; everything else is in its menu,
+    // so almost nothing covers the PC screen. Side (left/right) chosen in the menu, remembered.
+    _bureauFab = [UIButton buttonWithType:UIButtonTypeSystem];
+    _bureauFab.translatesAutoresizingMaskIntoConstraints = NO;
+    UIImageSymbolConfiguration *fabConfig = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightSemibold];
+    [_bureauFab setImage:[UIImage systemImageNamed:@"ellipsis" withConfiguration:fabConfig] forState:UIControlStateNormal];
+    _bureauFab.tintColor = UIColor.whiteColor;
+    _bureauFab.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.55];
+    _bureauFab.layer.cornerRadius = 22;
+    _bureauFab.layer.borderWidth = 0.5;
+    _bureauFab.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.25].CGColor;
+    _bureauFab.accessibilityLabel = @"Menu";
+    __weak typeof(self) weakSelf = self;
+    // Built at each opening, so every title says the current state
+    _bureauFab.menu = [UIMenu menuWithChildren:@[[UIDeferredMenuElement elementWithUncachedProvider:^(void (^completion)(NSArray<UIMenuElement *> *)) {
+        StreamFrameViewController *strongSelf = weakSelf;
+        completion(strongSelf != nil ? [strongSelf bureauMenuElements] : @[]);
+    }]]];
+    _bureauFab.showsMenuAsPrimaryAction = YES;
+    if (@available(iOS 16.0, *)) {
+        _bureauFab.preferredMenuElementOrder = UIContextMenuConfigurationElementOrderFixed;
     }
-    _bureauKeysRow = [[UIScrollView alloc] init];
-    _bureauKeysRow.showsHorizontalScrollIndicator = NO;
-    _bureauKeysRow.hidden = YES;
-    [_bureauKeysRow addSubview:keysStack];
+    [self.view addSubview:_bureauFab];
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    _bureauFabLeft = [_bureauFab.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12];
+    _bureauFabRight = [_bureauFab.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12];
     [NSLayoutConstraint activateConstraints:@[
-        [keysStack.leadingAnchor constraintEqualToAnchor:_bureauKeysRow.contentLayoutGuide.leadingAnchor],
-        [keysStack.trailingAnchor constraintEqualToAnchor:_bureauKeysRow.contentLayoutGuide.trailingAnchor],
-        [keysStack.topAnchor constraintEqualToAnchor:_bureauKeysRow.contentLayoutGuide.topAnchor],
-        [keysStack.bottomAnchor constraintEqualToAnchor:_bureauKeysRow.contentLayoutGuide.bottomAnchor],
-        [keysStack.heightAnchor constraintEqualToAnchor:_bureauKeysRow.frameLayoutGuide.heightAnchor],
-        [_bureauKeysRow.heightAnchor constraintEqualToConstant:40],
+        [_bureauFab.widthAnchor constraintEqualToConstant:44],
+        [_bureauFab.heightAnchor constraintEqualToConstant:44],
+        // Above the keyboard (and its key row) when it is open, else above the home bar
+        [_bureauFab.bottomAnchor constraintEqualToAnchor:self.view.keyboardLayoutGuide.topAnchor constant:-12],
     ]];
+    [self bureauPlaceFab];
 
-    UIStackView *rows = [[UIStackView alloc] initWithArrangedSubviews:@[mainRow, _bureauKeysRow]];
-    rows.axis = UILayoutConstraintAxisVertical;
-    rows.alignment = UIStackViewAlignmentCenter;
-    rows.spacing = 4;
-    rows.translatesAutoresizingMaskIntoConstraints = NO;
-    [_bureauBar.contentView addSubview:rows];
-    [NSLayoutConstraint activateConstraints:@[
-        [rows.topAnchor constraintEqualToAnchor:_bureauBar.contentView.topAnchor constant:4],
-        [rows.bottomAnchor constraintEqualToAnchor:_bureauBar.contentView.bottomAnchor constant:-4],
-        [rows.leadingAnchor constraintEqualToAnchor:_bureauBar.contentView.leadingAnchor constant:6],
-        [rows.trailingAnchor constraintEqualToAnchor:_bureauBar.contentView.trailingAnchor constant:-6],
-        [_bureauKeysRow.widthAnchor constraintEqualToAnchor:rows.widthAnchor],
-        [_bureauBar.topAnchor constraintEqualToAnchor:safe.topAnchor constant:6],
-        [_bureauBar.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
-        [_bureauBar.widthAnchor constraintLessThanOrEqualToAnchor:safe.widthAnchor constant:-16],
-    ]];
-
-    // Handle: always visible, small and translucent, shows/hides the toolbar
-    _bureauHandle = [UIButton buttonWithType:UIButtonTypeSystem];
-    _bureauHandle.translatesAutoresizingMaskIntoConstraints = NO;
-    _bureauHandle.backgroundColor = [UIColor colorWithWhite:0 alpha:0.35];
-    _bureauHandle.tintColor = [UIColor colorWithWhite:1 alpha:0.85];
-    _bureauHandle.layer.cornerRadius = 12;
-    _bureauHandle.accessibilityLabel = @"Barre d'outils";
-    [_bureauHandle addTarget:self action:@selector(bureauToggleToolbar) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:_bureauHandle];
-    [NSLayoutConstraint activateConstraints:@[
-        [_bureauHandle.widthAnchor constraintEqualToConstant:48],
-        [_bureauHandle.heightAnchor constraintEqualToConstant:24],
-        [_bureauHandle.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
-    ]];
-    // Two positions: under the toolbar when it is shown, at the top otherwise
-    NSLayoutConstraint *handleTop = [_bureauHandle.topAnchor constraintEqualToAnchor:safe.topAnchor constant:2];
-    handleTop.priority = UILayoutPriorityDefaultHigh;
-    handleTop.active = YES;
-
-    // Data used: a small pill under the handle, shown with the toolbar when chosen
-    _bureauDataPill = [[UIView alloc] init];
-    _bureauDataPill.translatesAutoresizingMaskIntoConstraints = NO;
-    _bureauDataPill.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
-    _bureauDataPill.layer.cornerRadius = 10;
-    _bureauDataPill.userInteractionEnabled = NO;
-    _bureauDataPill.hidden = YES;
-    _bureauDataLabel = [[UILabel alloc] init];
-    _bureauDataLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    _bureauDataLabel.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightMedium];
-    _bureauDataLabel.textColor = UIColor.whiteColor;
-    _bureauDataLabel.numberOfLines = 0;
-    _bureauDataLabel.textAlignment = NSTextAlignmentCenter;
-    [_bureauDataPill addSubview:_bureauDataLabel];
-    [self.view addSubview:_bureauDataPill];
-    [NSLayoutConstraint activateConstraints:@[
-        [_bureauDataLabel.topAnchor constraintEqualToAnchor:_bureauDataPill.topAnchor constant:6],
-        [_bureauDataLabel.bottomAnchor constraintEqualToAnchor:_bureauDataPill.bottomAnchor constant:-6],
-        [_bureauDataLabel.leadingAnchor constraintEqualToAnchor:_bureauDataPill.leadingAnchor constant:10],
-        [_bureauDataLabel.trailingAnchor constraintEqualToAnchor:_bureauDataPill.trailingAnchor constant:-10],
-        [_bureauDataPill.topAnchor constraintEqualToAnchor:_bureauHandle.bottomAnchor constant:6],
-        [_bureauDataPill.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
-        [_bureauDataPill.widthAnchor constraintLessThanOrEqualToAnchor:safe.widthAnchor constant:-16],
-    ]];
-    [self bureauUpdateHandle];
+    [self setupBureauKeyInput];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(bureauToggleKeyboard)
+                                                 name:@"MoonlightBureauToggleKeyboard" object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(bureauDragStarted)
+                                                 name:@"MoonlightBureauDragStarted" object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(bureauDragEnded)
+                                                 name:@"MoonlightBureauDragEnded" object:nil];
 
     // Phone-side mute, remembered between sessions
     BureauSetAudioMuted([[NSUserDefaults standardUserDefaults] boolForKey:BUREAU_MUTED_KEY]);
@@ -1274,7 +1285,6 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
     // Data counter: first reading = starting point, then saved every 15 s and at the end
     [self bureauFlushDataUsage];
     _bureauDataTimer = [NSTimer scheduledTimerWithTimeInterval:15 target:self selector:@selector(bureauFlushDataUsage) userInfo:nil repeats:YES];
-    [self bureauRefreshDataShown];
 
     // Two-finger drag = mouse wheel (vertical and horizontal), measured on screen
     UIPanGestureRecognizer *wheel = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(bureauWheel:)];
@@ -1330,7 +1340,6 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
     [[NSUserDefaults standardUserDefaults] setBool:muted forKey:BUREAU_MUTED_KEY];
     BureauSetAudioMuted(muted);
     [self bureauRefreshMuteTile];
-    [self bureauRestartHideTimer];
 }
 
 - (void)bureauRefreshMuteTile {
@@ -1429,29 +1438,12 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
             [f stringFromByteCount:(long long)wifi[0]], [f stringFromByteCount:(long long)wifi[1]], [f stringFromByteCount:(long long)wifi[2]]];
 }
 
-// Shown only when chosen (button next to the title), remembered between sessions
-- (void)bureauToggleDataShown {
-    BOOL shown = ![[NSUserDefaults standardUserDefaults] boolForKey:BUREAU_SHOW_DATA_KEY];
-    [[NSUserDefaults standardUserDefaults] setBool:shown forKey:BUREAU_SHOW_DATA_KEY];
-    [self bureauRefreshDataShown];
-    [UIView animateWithDuration:0.15 animations:^{
-        [self.view layoutIfNeeded];
-    }];
-    [self bureauRestartHideTimer];
-}
-
-- (void)bureauRefreshDataShown {
-    BOOL wanted = [[NSUserDefaults standardUserDefaults] boolForKey:BUREAU_SHOW_DATA_KEY];
-    if (wanted && !_bureauBar.hidden) {
-        _bureauDataLabel.text = [self bureauDataSummary];
-        _bureauDataPill.hidden = NO;
-        [self.view bringSubviewToFront:_bureauDataPill];
-    } else {
-        _bureauDataPill.hidden = YES;
-    }
-    [self bureauSetIcon:_bureauDataButton symbol:(wanted ? @"chart.bar.fill" : @"chart.bar")
-                   tint:(wanted ? UIColor.systemCyanColor : UIColor.whiteColor)];
-    _bureauDataButton.accessibilityLabel = wanted ? @"Masquer les données consommées" : @"Afficher les données consommées";
+- (void)bureauShowDataUsage {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Données consommées"
+                                                                    message:[self bureauDataSummary]
+                                                             preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 #pragma mark Two-finger wheel
@@ -1680,93 +1672,259 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
     }
 }
 
-#pragma mark Toolbar visibility
+#pragma mark Menu
 
-- (void)bureauUpdateHandle {
-    BOOL shown = !_bureauBar.hidden;
-    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightBold];
-    [_bureauHandle setImage:[UIImage systemImageNamed:(shown ? @"chevron.up" : @"chevron.down") withConfiguration:config]
-                   forState:UIControlStateNormal];
-    // Hidden toolbar: handle stays at the top. Shown: handle sits right under the toolbar.
-    for (NSLayoutConstraint *c in self.view.constraints) {
-        if (c.firstItem == _bureauHandle && c.firstAttribute == NSLayoutAttributeTop && c.secondItem == _bureauBar) {
-            c.active = NO;
-        }
-    }
-    if (shown) {
-        [_bureauHandle.topAnchor constraintEqualToAnchor:_bureauBar.bottomAnchor constant:2].active = YES;
-    }
-    [self.view bringSubviewToFront:_bureauBar];
-    [self.view bringSubviewToFront:_bureauHandle];
-    [self.view bringSubviewToFront:_bureauComposer];
+- (void)bureauPlaceFab {
+    BOOL left = [[NSUserDefaults standardUserDefaults] boolForKey:@"MoonlightBureauFabLeft"];
+    _bureauFabLeft.active = left;
+    _bureauFabRight.active = !left;
 }
 
-- (void)bureauToggleToolbar {
-    [self bureauSetToolbarShown:_bureauBar.hidden];
-}
-
-- (void)bureauSetToolbarShown:(BOOL)shown {
-    _bureauBar.hidden = !shown;
-    [self bureauRefreshDataShown];
-    if (!shown) {
-        _bureauKeysRow.hidden = YES;
-    }
-    [UIView animateWithDuration:0.15 animations:^{
-        [self bureauUpdateHandle];
-        [self.view layoutIfNeeded];
+- (UIAction *)bureauAction:(NSString *)title symbol:(NSString *)symbol handler:(void (^)(void))handler {
+    return [UIAction actionWithTitle:title
+                               image:(symbol != nil ? [UIImage systemImageNamed:symbol] : nil)
+                          identifier:nil
+                             handler:^(__kindof UIAction *action) {
+        handler();
     }];
-    [self bureauRestartHideTimer];
 }
 
-- (void)bureauRestartHideTimer {
-    [_bureauHideTimer invalidate];
-    _bureauHideTimer = nil;
-    if (!_bureauBar.hidden && !_bureauPinned) {
-        _bureauHideTimer = [NSTimer scheduledTimerWithTimeInterval:BUREAU_AUTOHIDE_SECONDS
-                                                            target:self
-                                                          selector:@selector(bureauAutoHide)
-                                                          userInfo:nil
-                                                           repeats:NO];
-    }
-}
-
-- (void)bureauAutoHide {
-    if (!_bureauPinned) {
-        [self bureauSetToolbarShown:NO];
-    }
-}
-
-- (void)bureauTogglePin {
-    _bureauPinned = !_bureauPinned;
-    [self bureauSetIcon:_bureauPinButton symbol:(_bureauPinned ? @"pin.fill" : @"pin")
-                   tint:(_bureauPinned ? UIColor.systemYellowColor : UIColor.whiteColor)];
-    [self bureauRestartHideTimer];
-}
-
-- (void)bureauToggleKeys {
-    _bureauKeysRow.hidden = !_bureauKeysRow.hidden;
-    [UIView animateWithDuration:0.15 animations:^{
-        [self.view layoutIfNeeded];
+- (UIAction *)bureauShortcut:(NSString *)title symbol:(NSString *)symbol key:(short)vk modifiers:(char)modifiers {
+    __weak typeof(self) weakSelf = self;
+    return [self bureauAction:title symbol:symbol handler:^{
+        [weakSelf bureauSendKey:vk modifiers:modifiers];
     }];
-    [self bureauRestartHideTimer];
+}
+
+- (NSArray<UIMenuElement *> *)bureauMenuElements {
+    __weak typeof(self) weakSelf = self;
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+
+    BOOL keyboardOpen = _bureauKeyInput.isFirstResponder;
+    UIMenu *typing = [UIMenu menuWithTitle:@"" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:@[
+        [self bureauAction:(keyboardOpen ? @"Fermer le clavier" : @"Clavier")
+                    symbol:(keyboardOpen ? @"keyboard.chevron.compact.down" : @"keyboard")
+                   handler:^{ [weakSelf bureauToggleKeyboard]; }],
+        [self bureauAction:@"Écrire avec correction" symbol:@"text.cursor" handler:^{ [weakSelf bureauShowComposer]; }],
+        [self bureauAction:@"Coller le texte de l'iPhone" symbol:@"doc.on.clipboard" handler:^{ [weakSelf bureauPasteFromPhone]; }],
+    ]];
+
+    UIMenu *shortcuts = [UIMenu menuWithTitle:@"Raccourcis" image:[UIImage systemImageNamed:@"command"] identifier:nil options:0 children:@[
+        [self bureauShortcut:@"Copier" symbol:@"doc.on.doc" key:'C' modifiers:MODIFIER_CTRL],
+        [self bureauShortcut:@"Coller" symbol:@"doc.on.clipboard" key:'V' modifiers:MODIFIER_CTRL],
+        [self bureauShortcut:@"Couper" symbol:@"scissors" key:'X' modifiers:MODIFIER_CTRL],
+        [self bureauShortcut:@"Annuler" symbol:@"arrow.uturn.backward" key:'Z' modifiers:MODIFIER_CTRL],
+        [self bureauShortcut:@"Tout sélectionner" symbol:@"checklist" key:'A' modifiers:MODIFIER_CTRL],
+        [self bureauShortcut:@"Rechercher" symbol:@"magnifyingglass" key:'F' modifiers:MODIFIER_CTRL],
+        [self bureauShortcut:@"Changer de fenêtre (Alt+Tab)" symbol:@"rectangle.on.rectangle" key:BUREAU_VK_TAB modifiers:MODIFIER_ALT],
+        [self bureauShortcut:@"Afficher le bureau" symbol:@"menubar.dock.rectangle" key:'D' modifiers:MODIFIER_META],
+        [self bureauShortcut:@"Fermer la fenêtre (Alt+F4)" symbol:@"xmark.square" key:0x73 modifiers:MODIFIER_ALT],
+        [self bureauShortcut:@"Gestionnaire des tâches" symbol:@"cpu" key:BUREAU_VK_ESCAPE modifiers:(MODIFIER_CTRL | MODIFIER_SHIFT)],
+        [self bureauShortcut:@"Capture d'écran" symbol:@"camera.viewfinder" key:'S' modifiers:(MODIFIER_META | MODIFIER_SHIFT)],
+        [self bureauShortcut:@"Menu Démarrer" symbol:@"square.grid.2x2" key:BUREAU_VK_LWIN modifiers:0],
+    ]];
+
+    NSMutableArray<UIMenuElement *> *viewItems = [NSMutableArray array];
+    if (_scrollView.zoomScale > 1.01f) {
+        [viewItems addObject:[self bureauAction:@"Zoom 100 %" symbol:@"arrow.down.right.and.arrow.up.left" handler:^{ [weakSelf bureauResetZoom]; }]];
+    }
+    BOOL muted = [defaults boolForKey:BUREAU_MUTED_KEY];
+    [viewItems addObject:[self bureauAction:(muted ? @"Remettre le son" : @"Couper le son de l'iPhone")
+                                     symbol:(muted ? @"speaker.wave.2" : @"speaker.slash")
+                                    handler:^{ [weakSelf bureauToggleMute]; }]];
+    BOOL locked = [self bureauOrientationLock] != 0;
+    [viewItems addObject:[self bureauAction:(locked ? @"Déverrouiller l'orientation" : @"Verrouiller l'orientation")
+                                     symbol:(locked ? @"lock.rotation.open" : @"lock.rotation")
+                                    handler:^{ [weakSelf bureauToggleOrientationLock]; }]];
+    [viewItems addObject:[self bureauAction:@"Données consommées" symbol:@"chart.bar" handler:^{ [weakSelf bureauShowDataUsage]; }]];
+    BOOL left = [defaults boolForKey:@"MoonlightBureauFabLeft"];
+    [viewItems addObject:[self bureauAction:(left ? @"Mettre ce bouton à droite" : @"Mettre ce bouton à gauche")
+                                     symbol:(left ? @"arrow.right.to.line" : @"arrow.left.to.line")
+                                    handler:^{
+        [[NSUserDefaults standardUserDefaults] setBool:!left forKey:@"MoonlightBureauFabLeft"];
+        StreamFrameViewController *strongSelf = weakSelf;
+        [strongSelf bureauPlaceFab];
+        [UIView animateWithDuration:0.25 animations:^{
+            [strongSelf.view layoutIfNeeded];
+        }];
+    }]];
+    UIMenu *view = [UIMenu menuWithTitle:@"" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:viewItems];
+
+    UIAction *disconnect = [self bureauAction:@"Se déconnecter" symbol:@"xmark.circle" handler:^{ [weakSelf bureauDisconnect]; }];
+    disconnect.attributes = UIMenuElementAttributesDestructive;
+    UIMenu *end = [UIMenu menuWithTitle:@"" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:@[disconnect]];
+
+    return @[typing, shortcuts, view, end];
+}
+
+#pragma mark Direct keyboard
+
+- (void)setupBureauKeyInput {
+    _bureauKeyInput = [[BureauKeyInput alloc] initWithFrame:CGRectZero];
+    __weak typeof(self) weakSelf = self;
+    _bureauKeyInput.onText = ^(NSString *text) {
+        [weakSelf bureauTypeText:text];
+    };
+    _bureauKeyInput.onBackspace = ^{
+        [weakSelf bureauSendKey:BUREAU_VK_BACK modifiers:0];
+    };
+    [self.view addSubview:_bureauKeyInput];
+
+    // One thin row above the keyboard: close, keys the iPhone keyboard lacks, paste, and the
+    // switch to typing with correction. It scrolls sideways on a narrow screen.
+    UIVisualEffectView *row = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterialDark]];
+    row.frame = CGRectMake(0, 0, MAX(self.view.bounds.size.width, 320), 40);
+    row.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+
+    UIButton *close = [self bureauButtonWithSymbol:@"keyboard.chevron.compact.down" title:@"Fermer le clavier" action:@selector(bureauHideKeyboard)];
+    UIButton *corrected = [self bureauButtonWithSymbol:@"text.cursor" title:@"Écrire avec correction" action:@selector(bureauShowComposer)];
+    UIButton *paste = [self bureauButtonWithSymbol:@"doc.on.clipboard" title:@"Coller le texte de l'iPhone" action:@selector(bureauPasteFromPhone)];
+    NSArray *keys = @[
+        @[@"Échap", @(BUREAU_VK_ESCAPE), @0], @[@"Tab", @(BUREAU_VK_TAB), @0], @[@"⊞", @(BUREAU_VK_LWIN), @0],
+        @[@"←", @(BUREAU_VK_LEFT), @0], @[@"↑", @(BUREAU_VK_UP), @0], @[@"↓", @(BUREAU_VK_DOWN), @0], @[@"→", @(BUREAU_VK_RIGHT), @0],
+        @[@"Suppr", @(BUREAU_VK_DELETE), @0],
+    ];
+    UIStackView *keysStack = [[UIStackView alloc] init];
+    keysStack.axis = UILayoutConstraintAxisHorizontal;
+    keysStack.spacing = 0;
+    keysStack.translatesAutoresizingMaskIntoConstraints = NO;
+    for (NSArray *key in keys) {
+        UIButton *b = [self bureauButtonWithSymbol:nil title:key[0] action:@selector(bureauKeyButton:)];
+        b.tag = ([key[1] intValue] & 0xFF) | ([key[2] intValue] << 8);
+        [keysStack addArrangedSubview:b];
+    }
+    [keysStack addArrangedSubview:paste];
+    UIScrollView *keysScroll = [[UIScrollView alloc] init];
+    keysScroll.showsHorizontalScrollIndicator = NO;
+    keysScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    [keysScroll addSubview:keysStack];
+
+    UIStackView *line = [[UIStackView alloc] initWithArrangedSubviews:@[close, keysScroll, corrected]];
+    line.axis = UILayoutConstraintAxisHorizontal;
+    line.alignment = UIStackViewAlignmentCenter;
+    line.spacing = 2;
+    line.translatesAutoresizingMaskIntoConstraints = NO;
+    [row.contentView addSubview:line];
+    [NSLayoutConstraint activateConstraints:@[
+        [keysStack.leadingAnchor constraintEqualToAnchor:keysScroll.contentLayoutGuide.leadingAnchor],
+        [keysStack.trailingAnchor constraintEqualToAnchor:keysScroll.contentLayoutGuide.trailingAnchor],
+        [keysStack.topAnchor constraintEqualToAnchor:keysScroll.contentLayoutGuide.topAnchor],
+        [keysStack.bottomAnchor constraintEqualToAnchor:keysScroll.contentLayoutGuide.bottomAnchor],
+        [keysStack.heightAnchor constraintEqualToAnchor:keysScroll.frameLayoutGuide.heightAnchor],
+        [keysScroll.heightAnchor constraintEqualToConstant:40],
+        [line.leadingAnchor constraintEqualToAnchor:row.contentView.safeAreaLayoutGuide.leadingAnchor constant:2],
+        [line.trailingAnchor constraintEqualToAnchor:row.contentView.safeAreaLayoutGuide.trailingAnchor constant:-2],
+        [line.topAnchor constraintEqualToAnchor:row.contentView.topAnchor],
+        [line.bottomAnchor constraintEqualToAnchor:row.contentView.bottomAnchor],
+    ]];
+    [keysScroll setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    _bureauKeyInput.bureauAccessory = row;
+}
+
+// One typed key or a dictated / pasted string
+- (void)bureauTypeText:(NSString *)text {
+    if ([text isEqualToString:@"\n"]) {
+        [self bureauSendKey:BUREAU_VK_RETURN modifiers:0];
+    } else if ([text isEqualToString:@"\t"]) {
+        [self bureauSendKey:BUREAU_VK_TAB modifiers:0];
+    } else if (text.length > 0) {
+        [self bureauSendTextToPC:text];
+    }
+}
+
+- (void)bureauToggleKeyboard {
+    if (_bureauKeyInput.isFirstResponder) {
+        [self bureauHideKeyboard];
+    } else {
+        [self bureauShowKeyboard];
+    }
+}
+
+- (void)bureauShowKeyboard {
+    if (!_bureauComposer.hidden) {
+        _bureauComposer.hidden = YES;
+        _bureauFab.hidden = NO;
+    }
+    [_bureauKeyInput becomeFirstResponder];
+}
+
+// The stream view takes the focus back, so a Bluetooth keyboard keeps typing on the PC
+- (void)bureauHideKeyboard {
+    [_bureauKeyInput resignFirstResponder];
+    [_streamView becomeFirstResponder];
+}
+
+#pragma mark Drag feedback
+
+// Like Chrome Remote Desktop (trackpad_input_strategy.cc, kDragFeedbackRadius): a small ring
+// on the cursor while a long press drags, so it is clear the button is held
+- (void)bureauDragStarted {
+    if (_bureauDragRing == nil) {
+        _bureauDragRing = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 30, 30)];
+        _bureauDragRing.userInteractionEnabled = NO;
+        _bureauDragRing.layer.cornerRadius = 15;
+        _bureauDragRing.layer.borderWidth = 2;
+        _bureauDragRing.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.9].CGColor;
+        _bureauDragRing.backgroundColor = [UIColor colorWithWhite:1 alpha:0.15];
+        [self.view addSubview:_bureauDragRing];
+    }
+    [self bureauPlaceDragRing];
+    _bureauDragRing.alpha = 0;
+    _bureauDragRing.transform = CGAffineTransformMakeScale(1.6, 1.6);
+    [self.view bringSubviewToFront:_bureauDragRing];
+    [UIView animateWithDuration:0.15 animations:^{
+        self->_bureauDragRing.alpha = 1;
+        self->_bureauDragRing.transform = CGAffineTransformIdentity;
+    }];
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+}
+
+- (void)bureauDragEnded {
+    [UIView animateWithDuration:0.2 animations:^{
+        self->_bureauDragRing.alpha = 0;
+    }];
+}
+
+- (void)bureauPlaceDragRing {
+    if (_bureauDragRing == nil || !_bureauCursorKnown) {
+        return;
+    }
+    _bureauDragRing.center = [_streamView convertPoint:_bureauCursor toView:self.view];
+}
+
+#pragma mark Privacy in the app switcher
+
+// Like Chrome Remote Desktop: when the app leaves the screen, the PC picture is blurred, so
+// the app switcher does not show the desktop
+- (void)bureauShowPrivacyBlur {
+    if (_bureauPrivacyBlur != nil) {
+        return;
+    }
+    UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleRegular]];
+    blur.frame = self.view.bounds;
+    blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:blur];
+    _bureauPrivacyBlur = blur;
+}
+
+- (void)bureauHidePrivacyBlur {
+    [_bureauPrivacyBlur removeFromSuperview];
+    _bureauPrivacyBlur = nil;
 }
 
 #pragma mark Actions
 
 - (void)bureauResetZoom {
     [_scrollView setZoomScale:1.0 animated:YES];
-    [self bureauRestartHideTimer];
 }
 
 // Confirmation against mis-taps
 - (void)bureauDisconnect {
-    [_bureauHideTimer invalidate];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Se déconnecter ?"
                                                                     message:@"La session sur le PC reste ouverte."
                                                              preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Annuler" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
-        [self bureauRestartHideTimer];
-    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Annuler" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Déconnecter" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
         [self returnToMainFrame];
     }]];
@@ -1777,7 +1935,6 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
     short vk = sender.tag & 0xFF;
     char modifiers = (char)((sender.tag >> 8) & 0xFF);
     [self bureauSendKey:vk modifiers:modifiers];
-    [self bureauRestartHideTimer];
 }
 
 - (void)bureauPasteFromPhone {
@@ -1785,13 +1942,12 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
     if (text.length > 0) {
         [self bureauSendTextToPC:text];
     }
-    [self bureauRestartHideTimer];
 }
 
 #pragma mark Composer
 
 - (void)bureauShowComposer {
-    [self bureauSetToolbarShown:NO];
+    _bureauFab.hidden = YES;
     _bureauComposer.hidden = NO;
     [self.view bringSubviewToFront:_bureauComposer];
     [_bureauTextView becomeFirstResponder];
@@ -1802,14 +1958,17 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
 
 - (void)bureauHideComposer {
     [_bureauTextView resignFirstResponder];
+    [_streamView becomeFirstResponder];
     _bureauComposer.hidden = YES;
+    _bureauFab.hidden = NO;
     [self.view setNeedsLayout];
 }
 
 // Keyboard closed by any means (swipe, other app...): hide the composer too
 - (void)textViewDidEndEditing:(UITextView *)textView {
-    if (textView == _bureauTextView) {
+    if (textView == _bureauTextView && !_bureauTextView.isFirstResponder) {
         _bureauComposer.hidden = YES;
+        _bureauFab.hidden = NO;
     }
 }
 
@@ -1863,7 +2022,7 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
     NSString *normalized = [[text stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"]
                             stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
     NSArray<NSString *> *lines = [normalized componentsSeparatedByString:@"\n"];
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+    dispatch_async(BureauInputQueue(), ^{
         for (NSUInteger i = 0; i < lines.count; i++) {
             if (i > 0) {
                 [self bureauKeyPressSync:BUREAU_VK_RETURN modifiers:MODIFIER_SHIFT];
@@ -1896,7 +2055,7 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
 }
 
 - (void)bureauSendKey:(short)vk modifiers:(char)modifiers {
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+    dispatch_async(BureauInputQueue(), ^{
         [self bureauKeyPressSync:vk modifiers:modifiers];
     });
 }

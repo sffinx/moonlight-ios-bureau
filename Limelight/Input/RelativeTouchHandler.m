@@ -191,6 +191,9 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
     if (!touchMoved && !isDragging){
         isDragging = true;
         LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
+#if !TARGET_OS_TV
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"MoonlightBureauDragStarted" object:nil];
+#endif
     }
 }
 
@@ -359,6 +362,9 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
     if (isDragging) {
         isDragging = false;
         LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+#if !TARGET_OS_TV
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"MoonlightBureauDragEnded" object:nil];
+#endif
     } else if (!touchMoved) {
         if (peakTouchCount == 2) {
             dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
@@ -411,6 +417,9 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
     if (isDragging) {
         isDragging = false;
         LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+#if !TARGET_OS_TV
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"MoonlightBureauDragEnded" object:nil];
+#endif
     }
     peakTouchCount = 0;
 }

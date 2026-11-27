@@ -379,6 +379,12 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
         [touchHandler touchesBegan:touches withEvent:event];
         
         if ([[event allTouches] count] == 3) {
+#if !TARGET_OS_TV
+            // Moonlight Bureau: in trackpad mode, three fingers open or close the direct keyboard
+            if ([touchHandler isKindOfClass:[RelativeTouchHandler class]]) {
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"MoonlightBureauToggleKeyboard" object:nil];
+            } else
+#endif
             if (isInputingText) {
                 Log(LOG_D, @"Closing the keyboard");
                 [keyInputField resignFirstResponder];
