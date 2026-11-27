@@ -195,6 +195,14 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 }
 #endif
 
+#if !TARGET_OS_TV
+- (void) bureauSyncCursor {
+    if ([touchHandler respondsToSelector:@selector(bureauSyncCursor)]) {
+        [(id)touchHandler bureauSyncCursor];
+    }
+}
+#endif
+
 - (CGSize) getVideoAreaSize {
     if (self.bounds.size.width > self.bounds.size.height * streamAspectRatio) {
         return CGSizeMake(self.bounds.size.height * streamAspectRatio, self.bounds.size.height);

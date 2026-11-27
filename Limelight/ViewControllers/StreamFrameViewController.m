@@ -515,6 +515,8 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
         [MainFrameViewController bureauCancelResume];
         // Fresh full picture right away (the decoder rebuilds itself if iOS broke it)
         LiRequestIdrFrame();
+        // Someone may have moved the mouse on the PC meanwhile
+        [self bureauSyncCursorSoon];
     }
 #endif
     // Stop the background timer, since we're foregrounded again
@@ -574,7 +576,10 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
         // the first frame of video.
         self->_stageLabel.hidden = YES;
         self->_tipLabel.hidden = YES;
-        
+#if !TARGET_OS_TV
+        [self bureauSyncCursorSoon];
+#endif
+
         [self->_streamView showOnScreenControls];
         
         [self->_controllerSupport connectionEstablished];
@@ -1194,6 +1199,8 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
     wheel.delaysTouchesBegan = NO;
     wheel.delaysTouchesEnded = NO;
     wheel.delegate = (id<UIGestureRecognizerDelegate>)self;
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(bureauTouchBegan:)
+                                                 name:@"MoonlightBureauTouchBegan" object:nil];
     if (!_settings.absoluteTouchMode) {
         // A UIView created in code accepts a single finger by default (multipleTouchEnabled = NO):
         // the second finger never reached the stream view, so neither this wheel nor the old
@@ -1395,6 +1402,30 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
 - (void)bureauStopWheelFling {
     [_bureauWheelFling invalidate];
     _bureauWheelFling = nil;
+}
+
+// A new touch stops the wheel fling (and tells the trackpad not to click)
+- (void)bureauTouchBegan:(NSNotification *)notification {
+    if (_bureauWheelFling != nil) {
+        [self bureauStopWheelFling];
+        ((NSMutableDictionary *)notification.userInfo)[@"stopped"] = @YES;
+    }
+}
+
+// The video size is known a moment after the first frame; until then the position is unknown
+- (void)bureauSyncCursorSoon {
+    if (_settings.absoluteTouchMode) {
+        return;
+    }
+    __weak typeof(self) weakSelf = self;
+    for (NSNumber *delay in @[@0.3, @1.0]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            StreamFrameViewController *strongSelf = weakSelf;
+            if (strongSelf != nil) {
+                [strongSelf->_streamView bureauSyncCursor];
+            }
+        });
+    }
 }
 
 - (void)bureauWheelFlingTick:(CADisplayLink *)link {

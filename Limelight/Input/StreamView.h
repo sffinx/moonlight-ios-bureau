@@ -31,6 +31,9 @@
 - (OnScreenControlsLevel) getCurrentOscState;
 // Moonlight Bureau: used by the trackpad cursor to send absolute positions
 - (CGSize) getVideoAreaSize;
+#if !TARGET_OS_TV
+- (void) bureauSyncCursor;
+#endif
 
 #if !TARGET_OS_TV
 - (void) updateCursorLocation:(CGPoint)location isMouse:(BOOL)isMouse;

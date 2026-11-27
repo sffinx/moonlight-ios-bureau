@@ -14,6 +14,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 -(id)initWithView:(StreamView*)view;
 
+#if !TARGET_OS_TV
+// Moonlight Bureau: places the PC cursor where the trackpad believes it is (center at first),
+// so the first finger movement does not make it jump across the screen
+- (void)bureauSyncCursor;
+#endif
+
 @end
 
 NS_ASSUME_NONNULL_END

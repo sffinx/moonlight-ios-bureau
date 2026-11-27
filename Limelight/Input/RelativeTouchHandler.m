@@ -45,6 +45,8 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
     // Moonlight Bureau: a two-finger gesture (wheel, zoom, right click) is under way; the finger
     // left on screen while the other lifts must not move the cursor (the view would follow it)
     BOOL multiTouchSequence;
+    // A touch that only stops a moving cursor or wheel (fling) must not click
+    BOOL touchStoppedFling;
     CFTimeInterval flingStart;
     CGFloat flingSpeed, flingDuration, flingDirX, flingDirY;
     CGPoint flingPrevious;
@@ -82,6 +84,10 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
 }
 
 #if !TARGET_OS_TV
+- (void)bureauSyncCursor {
+    [self moveCursorByX:0 y:0 accelerate:NO];
+}
+
 - (void)stopFling {
     [flingLink invalidate];
     flingLink = nil;
@@ -185,6 +191,12 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
 
 - (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event {
 #if !TARGET_OS_TV
+    // Like iOS lists: a tap on something still moving stops it, without clicking
+    if ([[event allTouches] count] == [touches count]) {
+        NSMutableDictionary *info = [NSMutableDictionary dictionary];
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"MoonlightBureauTouchBegan" object:nil userInfo:info];
+        touchStoppedFling = flingLink != nil || [info[@"stopped"] boolValue];
+    }
     [self stopFling];
     velocity = CGPointZero;
     lastMoveTime = CACurrentMediaTime();
@@ -214,9 +226,11 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
         }
     }
     else if ([[event allTouches] count] == 2) {
+        [dragTimer invalidate];
+        dragTimer = nil;
         CGPoint firstLocation = [[[[event allTouches] allObjects] objectAtIndex:0] locationInView:view];
         CGPoint secondLocation = [[[[event allTouches] allObjects] objectAtIndex:1] locationInView:view];
-        
+
         originalLocation = touchLocation = CGPointMake((firstLocation.x + secondLocation.x) / 2, (firstLocation.y + secondLocation.y) / 2);
     }
 }
@@ -303,6 +317,14 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
     if (!isDragging && touchMoved && peakTouchCount == 1 && [[event allTouches] count] == [touches count] &&
         CACurrentMediaTime() - lastMoveTime < FLING_MAX_IDLE) {
         [self startFlingWithVelocity:velocity];
+    }
+#endif
+#if !TARGET_OS_TV
+    if (touchStoppedFling && !isDragging) {
+        if ([[event allTouches] count] == [touches count]) {
+            touchStoppedFling = NO;
+        }
+        touchMoved = true; // no click for this touch
     }
 #endif
     if (isDragging) {
