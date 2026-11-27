@@ -45,7 +45,7 @@ jobs:
         working-directory: libs/tsbridge/src
         run: |
           set -euo pipefail
-          go get tailscale.com@latest
+          go get tailscale.com@v1.106.1  # mise à jour : changer la version ici
           go mod tidy
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           export CGO_ENABLED=1 GOOS=ios GOARCH=arm64
