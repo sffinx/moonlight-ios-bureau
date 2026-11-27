@@ -1115,6 +1115,11 @@ static NSString *const BUREAU_RESUME_KEY = @"MoonlightBureauResumeAt";
     [[NSUserDefaults standardUserDefaults] setObject:[NSDate date] forKey:BUREAU_RESUME_KEY];
 }
 
+// The stream survived the background: nothing to resume
++ (void)bureauCancelResume {
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:BUREAU_RESUME_KEY];
+}
+
 // Consumes the resume request when the app is in front again. The PC keeps its session
 // open, so coming back within 30 minutes reconnects to it without going through the menu.
 - (BOOL)bureauTakeResumeRequest {

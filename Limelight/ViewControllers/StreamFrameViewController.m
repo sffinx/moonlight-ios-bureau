@@ -81,6 +81,8 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
     BOOL _bureauCursorKnown;
     CGPoint _bureauZoomAnchor;
     BOOL _bureauZoomAnchored;
+    BOOL _bureauInBackground;
+    NSDate *_bureauForegroundAt;
     CGFloat _bureauKeyboardOverlap; // height of the desktop hidden by the keyboard (+ composer)
     UIButton *_bureauRotationButton;
 #endif
@@ -436,6 +438,11 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
     }
     
 #if !TARGET_OS_TV
+    // Moonlight Bureau: the session stays open while inactive or in the background
+    // (see applicationDidEnterBackground:), no 60-second limit
+    if (YES) {
+        return;
+    }
     // Terminate the stream if the app is inactive for 60 seconds
     Log(LOG_I, @"Starting inactivity termination timer");
     _inactivityTimer = [NSTimer scheduledTimerWithTimeInterval:60
@@ -454,7 +461,25 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
     _inactivityTimer = nil;
 }
 
+#if !TARGET_OS_TV
+- (void)bureauBackgroundExpired {
+    Log(LOG_I, @"Moonlight Bureau: 30 minutes in the background, closing the session");
+    _inactivityTimer = nil;
+    [MainFrameViewController bureauRequestResume]; // coming back later still reconnects
+    [self returnToMainFrame];
+}
+#endif
+
 - (void)applicationDidBecomeActive:(NSNotification *)notification {
+#if !TARGET_OS_TV
+    if (_bureauInBackground) {
+        _bureauInBackground = NO;
+        _bureauForegroundAt = [NSDate date];
+        [MainFrameViewController bureauCancelResume];
+        // Fresh full picture right away (the decoder rebuilds itself if iOS broke it)
+        LiRequestIdrFrame();
+    }
+#endif
     // Stop the background timer, since we're foregrounded again
     if (_inactivityTimer != nil) {
         Log(LOG_I, @"Stopping inactivity timer after becoming active again");
@@ -465,6 +490,26 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
 
 // This fires when the home button is pressed
 - (void)applicationDidEnterBackground:(UIApplication *)application {
+#if !TARGET_OS_TV
+    // Moonlight Bureau: the stream stays connected in the background (UIBackgroundModes
+    // audio: iOS keeps an app running while it plays sound; the PC's sound, or silence
+    // when muted, keeps playing). Back in the app, the PC screen is still there.
+    // After 30 minutes in the background the session is closed to save data and battery;
+    // coming back then reconnects automatically. If iOS stops the app anyway (call,
+    // another app taking the audio), the reconnection also happens on return.
+    Log(LOG_I, @"Moonlight Bureau: staying connected in the background");
+    _bureauInBackground = YES;
+    [MainFrameViewController bureauRequestResume];
+    [_inactivityTimer invalidate];
+    _inactivityTimer = [NSTimer scheduledTimerWithTimeInterval:30 * 60
+                                                        target:self
+                                                      selector:@selector(bureauBackgroundExpired)
+                                                      userInfo:nil
+                                                       repeats:NO];
+    if (YES) {
+        return;
+    }
+#endif
     Log(LOG_I, @"Terminating stream immediately for backgrounding");
 
     if (_inactivityTimer != nil) {
@@ -516,6 +561,16 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
     dispatch_async(dispatch_get_main_queue(), ^{
         // Allow the display to go to sleep now
         [UIApplication sharedApplication].idleTimerDisabled = NO;
+
+#if !TARGET_OS_TV
+        BOOL justBack = self->_bureauForegroundAt != nil && -[self->_bureauForegroundAt timeIntervalSinceNow] < 20;
+        if (errorCode != ML_ERROR_GRACEFUL_TERMINATION && (self->_bureauInBackground || justBack)) {
+            Log(LOG_I, @"Moonlight Bureau: connection lost while away, reconnecting");
+            [MainFrameViewController bureauRequestResume];
+            [self returnToMainFrame];
+            return;
+        }
+#endif
         
         NSString* title;
         NSString* message;

@@ -25,6 +25,7 @@
 #if !TARGET_OS_TV
 // Moonlight Bureau: reconnect when the app comes back from the background
 + (void)bureauRequestResume;
++ (void)bureauCancelResume;
 #endif
 
 @end
