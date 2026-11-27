@@ -37,6 +37,30 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
 - (id)initWithRefreshRate:(float)arg1 videoDynamicRange:(int)arg2;
 @end
 
+#if !TARGET_OS_TV
+// Moonlight Bureau: in Chrome Remote Desktop (Chromium remoting/ios/client_gestures.mm and
+// client/gesture_interpreter.cc) a two-finger scroll only sends the wheel: the view never
+// moves during it, and zoom and scroll exclude each other. Here the zoomed image lives in a
+// UIScrollView whose own pinch and pan also moved it with the fingers; disabling them was
+// not enough (UIKit turns its pinch back on when zooming is possible), the image followed
+// the fingers and our re-centering on the cursor pulled it back ("bug danse"). This scroll
+// view refuses its built-in gestures for good: only bureauWheel: zooms, only the cursor moves
+// the view.
+@interface BureauStreamScrollView : UIScrollView
+@property (nonatomic) BOOL bureauNoBuiltInGestures;
+@end
+
+@implementation BureauStreamScrollView
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    if (self.bureauNoBuiltInGestures &&
+        (gestureRecognizer == self.pinchGestureRecognizer || gestureRecognizer == self.panGestureRecognizer)) {
+        return NO;
+    }
+    return [super gestureRecognizerShouldBegin:gestureRecognizer];
+}
+@end
+#endif
+
 @implementation StreamFrameViewController {
     ControllerSupport *_controllerSupport;
     StreamManager *_streamMan;
@@ -251,7 +275,13 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
     // dragging stays the mouse wheel (no manual pan) and the zoomed view follows the
     // cursor tracked by RelativeTouchHandler.
     if (_settings.absoluteTouchMode || !TARGET_OS_TV) {
+#if !TARGET_OS_TV
+        BureauStreamScrollView *bureauScroll = [[BureauStreamScrollView alloc] initWithFrame:self.view.frame];
+        bureauScroll.bureauNoBuiltInGestures = !_settings.absoluteTouchMode;
+        _scrollView = bureauScroll;
+#else
         _scrollView = [[UIScrollView alloc] initWithFrame:self.view.frame];
+#endif
 #if !TARGET_OS_TV
         // Moonlight Bureau: no automatic insets for the notch / home bar. They differ between
         // portrait and landscape and shifted the image (with some play) after each rotation.
@@ -387,6 +417,10 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
 - (void)trackpadCursorMoved:(NSNotification *)notification {
     _bureauCursor = [[notification.userInfo objectForKey:@"point"] CGPointValue];
     _bureauCursorKnown = YES;
+    // As in Chrome Remote Desktop, the view stays still while two fingers scroll
+    if (_bureauWheelMode == 1) {
+        return;
+    }
     [self bureauCenterOnCursor];
 }
 #endif
