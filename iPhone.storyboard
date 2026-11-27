@@ -15,7 +15,7 @@
                     <collectionView key="view" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="scaleToFill" dataMode="prototypes" id="Rtu-AT-Alw" customClass="AppCollectionView">
                         <rect key="frame" x="0.0" y="0.0" width="414" height="804"/>
                         <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
-                        <color key="backgroundColor" red="0.3333333432674408" green="0.3333333432674408" blue="0.3333333432674408" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                        <color key="backgroundColor" red="0.058823529411764705" green="0.074509803921568626" blue="0.13725490196078433" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                         <collectionViewFlowLayout key="collectionViewLayout" minimumLineSpacing="15" minimumInteritemSpacing="15" id="YcZ-cR-3tK">
                             <size key="itemSize" width="90" height="120"/>
                             <size key="headerReferenceSize" width="0.0" height="0.0"/>
@@ -63,7 +63,7 @@
                     <view key="view" contentMode="scaleToFill" id="Usg-e0-g4a">
                         <rect key="frame" x="0.0" y="0.0" width="414" height="896"/>
                         <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
-                        <color key="backgroundColor" red="1" green="1" blue="1" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                        <color key="backgroundColor" red="0.058823529411764705" green="0.074509803921568626" blue="0.13725490196078433" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                     </view>
                     <connections>
                         <segue destination="rYd-e6-cQU" kind="custom" identifier="sw_rear" customClass="SWRevealViewControllerSegueSetController" id="vBQ-bn-yZu"/>
@@ -335,7 +335,7 @@
                                 <color key="selectedSegmentTintColor" red="0.6716768742" green="0.61711704730000005" blue="0.99902987480000005" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                             </segmentedControl>
                         </subviews>
-                        <color key="backgroundColor" red="0.12156862745098039" green="0.12941176470588237" blue="0.14117647058823529" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                        <color key="backgroundColor" red="0.058823529411764705" green="0.074509803921568626" blue="0.13725490196078433" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                     </view>
                     <connections>
                         <outlet property="audioOnPCSelector" destination="8GA-Js-kQN" id="Gab-Tb-Syy"/>
@@ -368,8 +368,8 @@
                     <navigationBar key="navigationBar" contentMode="scaleToFill" barStyle="black" translucent="NO" id="0ZA-Ec-QgD">
                         <rect key="frame" x="0.0" y="48" width="414" height="44"/>
                         <autoresizingMask key="autoresizingMask"/>
-                        <color key="backgroundColor" red="0.66666668653488159" green="0.66666668653488159" blue="0.66666668653488159" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
-                        <color key="barTintColor" red="0.66666668653488159" green="0.66666668653488159" blue="0.66666668653488159" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                        <color key="backgroundColor" red="0.058823529411764705" green="0.074509803921568626" blue="0.13725490196078433" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                        <color key="barTintColor" red="0.058823529411764705" green="0.074509803921568626" blue="0.13725490196078433" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                         <textAttributes key="titleTextAttributes">
                             <offsetWrapper key="textShadowOffset" horizontal="0.0" vertical="0.0"/>
                         </textAttributes>
@@ -393,7 +393,7 @@
                     <view key="view" multipleTouchEnabled="YES" contentMode="scaleToFill" id="p4u-yn-VXk">
                         <rect key="frame" x="0.0" y="0.0" width="414" height="896"/>
                         <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
-                        <color key="backgroundColor" red="0.3333357871" green="0.33332890269999998" blue="0.33333355190000002" alpha="1" colorSpace="custom" customColorSpace="displayP3"/>
+                        <color key="backgroundColor" red="0.058823529411764705" green="0.074509803921568626" blue="0.13725490196078433" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                     </view>
                     <navigationItem key="navigationItem" id="8uX-4T-BiC"/>
                     <nil key="simulatedStatusBarMetrics"/>

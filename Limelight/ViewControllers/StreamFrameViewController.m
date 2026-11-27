@@ -123,7 +123,14 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
     
     _stageLabel = [[UILabel alloc] init];
     [_stageLabel setUserInteractionEnabled:NO];
+#if TARGET_OS_TV
     [_stageLabel setText:[NSString stringWithFormat:@"Starting %@...", self.streamConfig.appName]];
+#else
+    // Moonlight Bureau: same night-blue as the main screen, French text
+    self.view.backgroundColor = [UIColor colorWithRed:0.05 green:0.06 blue:0.11 alpha:1];
+    [_stageLabel setText:@"Connexion au PC…"];
+    _stageLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+#endif
     [_stageLabel sizeToFit];
     _stageLabel.textAlignment = NSTextAlignmentCenter;
     _stageLabel.textColor = [UIColor whiteColor];
@@ -181,7 +188,9 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
 #if TARGET_OS_TV
     [_tipLabel setText:@"Tip: Tap the Play/Pause button on the Apple TV Remote to disconnect from your PC"];
 #else
-    [_tipLabel setText:@"Astuce : poignée en haut > bouton rouge pour se déconnecter"];
+    [_tipLabel setText:@"Astuce : la poignée en haut ouvre la barre, la croix rouge déconnecte"];
+    _tipLabel.font = [UIFont systemFontOfSize:14];
+    _tipLabel.numberOfLines = 0;
 #endif
     
     [_tipLabel sizeToFit];
@@ -264,6 +273,22 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
     [self.view addSubview:_tipLabel];
 
 #if !TARGET_OS_TV
+    for (UIView *v in @[_stageLabel, _spinner, _tipLabel]) {
+        v.translatesAutoresizingMaskIntoConstraints = NO;
+    }
+    _stageLabel.numberOfLines = 0;
+    UILayoutGuide *safeArea = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [_spinner.centerXAnchor constraintEqualToAnchor:safeArea.centerXAnchor],
+        [_spinner.bottomAnchor constraintEqualToAnchor:_stageLabel.topAnchor constant:-14],
+        [_stageLabel.centerXAnchor constraintEqualToAnchor:safeArea.centerXAnchor],
+        [_stageLabel.centerYAnchor constraintEqualToAnchor:safeArea.centerYAnchor],
+        [_stageLabel.widthAnchor constraintLessThanOrEqualToAnchor:safeArea.widthAnchor constant:-48],
+        [_tipLabel.centerXAnchor constraintEqualToAnchor:safeArea.centerXAnchor],
+        [_tipLabel.bottomAnchor constraintEqualToAnchor:safeArea.bottomAnchor constant:-24],
+        [_tipLabel.widthAnchor constraintLessThanOrEqualToAnchor:safeArea.widthAnchor constant:-48],
+    ]];
+    _tipLabel.textColor = [UIColor colorWithWhite:1 alpha:0.6];
     [self setupBureauToolbar];
 #endif
 }
@@ -647,11 +672,13 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
 - (void) stageStarting:(const char*)stageName {
     Log(LOG_I, @"Starting %s", stageName);
     dispatch_async(dispatch_get_main_queue(), ^{
+#if TARGET_OS_TV
         NSString* lowerCase = [NSString stringWithFormat:@"%s in progress...", stageName];
         NSString* titleCase = [[[lowerCase substringToIndex:1] uppercaseString] stringByAppendingString:[lowerCase substringFromIndex:1]];
         [self->_stageLabel setText:titleCase];
         [self->_stageLabel sizeToFit];
         self->_stageLabel.center = CGPointMake(self.view.frame.size.width / 2, self->_stageLabel.center.y);
+#endif
     });
 }
 
