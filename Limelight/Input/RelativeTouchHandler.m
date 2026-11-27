@@ -276,8 +276,14 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
             if (now - firstTouchTime < 0.12) {
                 heldMove = CGPointMake(heldMove.x + dx, heldMove.y + dy);
             } else {
-                [self moveCursorByX:dx + heldMove.x y:dy + heldMove.y];
-                heldMove = CGPointZero;
+                // Catch up the held movement gradually (35 % per event): sending it at once
+                // made the cursor, and the zoomed view that follows it, jump ("bug danse")
+                CGPoint take = heldMove;
+                if (fabs(heldMove.x) + fabs(heldMove.y) > 1) {
+                    take = CGPointMake(heldMove.x * 0.35, heldMove.y * 0.35);
+                }
+                heldMove = CGPointMake(heldMove.x - take.x, heldMove.y - take.y);
+                [self moveCursorByX:dx + take.x y:dy + take.y];
             }
             touchLocation = currentLocation;
             if ([self isConfirmedMove:screenTouch from:screenOriginal]) {
