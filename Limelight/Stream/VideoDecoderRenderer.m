@@ -35,6 +35,8 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
     
     CADisplayLink* _displayLink;
     BOOL framePacing;
+    // Moonlight Bureau: back from the background, the picture restarts from a fresh layer
+    BOOL bureauResetPending;
 }
 
 - (void)reinitializeDisplayLayer
@@ -109,7 +111,17 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
         _displayLink.preferredFramesPerSecond = self->frameRate;
     }
     [_displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSDefaultRunLoopMode];
+#if !TARGET_OS_TV
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(bureauRequestVideoReset)
+                                                 name:@"MoonlightBureauVideoReset" object:nil];
+#endif
 }
+
+#if !TARGET_OS_TV
+- (void)bureauRequestVideoReset {
+    bureauResetPending = YES;
+}
+#endif
 
 // TODO: Refactor this
 int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
@@ -143,6 +155,9 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
 - (void)stop
 {
     [_displayLink invalidate];
+#if !TARGET_OS_TV
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"MoonlightBureauVideoReset" object:nil];
+#endif
 }
 
 #define NALU_START_PREFIX_SIZE 3
@@ -515,6 +530,25 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
         return DR_NEED_IDR;
     }
     
+#if !TARGET_OS_TV
+    // Moonlight Bureau: while the app was in the background iOS paused the decoder. It then
+    // ignores new frames until flushed (requiresFlushToResumeDecoding), and the frames missed
+    // meanwhile break the chain of partial updates: only the parts of the PC screen that
+    // changed were redrawn, windows looked wrong until the app was restarted. A fresh layer
+    // and a full picture (IDR) fix both.
+    BOOL bureauFlushNeeded = NO;
+    if (@available(iOS 14.0, *)) {
+        bureauFlushNeeded = displayLayer.requiresFlushToResumeDecoding;
+    }
+    if (bureauResetPending || bureauFlushNeeded) {
+        Log(LOG_I, @"Moonlight Bureau: video restarted (back from the background: %d, flush needed: %d)", bureauResetPending, bureauFlushNeeded);
+        bureauResetPending = NO;
+        [self reinitializeDisplayLayer];
+        free(data);
+        return DR_NEED_IDR;
+    }
+#endif
+
     // Check for previous decoder errors before doing anything
     if (displayLayer.status == AVQueuedSampleBufferRenderingStatusFailed) {
         Log(LOG_E, @"Display layer rendering failed: %@", displayLayer.error);

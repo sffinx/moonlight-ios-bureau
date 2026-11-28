@@ -780,7 +780,8 @@ static dispatch_queue_t BureauInputQueue(void) {
         _bureauInBackground = NO;
         _bureauForegroundAt = [NSDate date];
         [MainFrameViewController bureauCancelResume];
-        // Fresh full picture right away (the decoder rebuilds itself if iOS broke it)
+        // Fresh display layer and full picture right away (VideoDecoderRenderer)
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"MoonlightBureauVideoReset" object:nil];
         LiRequestIdrFrame();
         // Someone may have moved the mouse on the PC meanwhile
         [self bureauSyncCursorSoon];
