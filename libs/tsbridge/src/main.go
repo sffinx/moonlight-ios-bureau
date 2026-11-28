@@ -326,11 +326,14 @@ func run(dir string, hostname string, _ int, _ int) {
 
 		mu.Lock()
 		ready := st.BackendState == "Running" && targetIP != ""
-		if ready && !forwarding {
-			addLog("relais actif")
-		}
+		justReady := ready && !forwarding
 		forwarding = ready
 		mu.Unlock()
+		// addLog takes mu itself: never call it while mu is held (Go mutexes are not
+		// reentrant; build 46 froze the relay for good this way)
+		if justReady {
+			addLog("relais actif")
+		}
 
 		// Fast while starting, then every 2 s
 		if ready {
