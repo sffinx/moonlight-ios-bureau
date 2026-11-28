@@ -2194,6 +2194,13 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
     [self bureauPasteText:text];
 }
 
+// The PC clipboard helper: same address as the stream, port = Sunshine HTTP port - 2
+- (NSString *)bureauHelperAddress:(unsigned short *)port {
+    NSString *active = self.streamConfig.host ?: @"";
+    *port = (unsigned short)([Utils addressPortStringToPort:active] - 2);
+    return [Utils addressPortStringToAddress:active];
+}
+
 - (void)bureauPasteText:(NSString *)text {
     unsigned short port = 0;
     NSString *address = [self bureauHelperAddress:&port];
