@@ -13,6 +13,14 @@
 #import "ControllerSupport.h"
 #import "DataManager.h"
 #import "Connection.h"
+#import "Utils.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <ifaddrs.h>
 #include <net/if.h>
 
@@ -115,6 +123,77 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
 }
 @end
 
+// Paste in one go: the whole text goes to the PC's clipboard helper
+// (Client - Téléphone\Presse-Papiers-Tel.ps1 on the PC, port = Sunshine HTTP port - 2), which
+// answers "OK"; the app then presses Ctrl+V. Typing it key by key was slow and could mix up.
+// Raw TCP with a fixed first line, so a web page cannot imitate it. Background thread only.
+static BOOL BureauSendToPCClipboard(NSString *address, unsigned short port, NSData *data) {
+    struct addrinfo hints = {0};
+    struct addrinfo *res = NULL;
+    hints.ai_socktype = SOCK_STREAM;
+    char portString[8];
+    snprintf(portString, sizeof(portString), "%u", port);
+    if (getaddrinfo(address.UTF8String, portString, &hints, &res) != 0 || res == NULL) {
+        return NO;
+    }
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd < 0) {
+        freeaddrinfo(res);
+        return NO;
+    }
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    int rc = connect(fd, res->ai_addr, res->ai_addrlen);
+    freeaddrinfo(res);
+    if (rc != 0 && errno != EINPROGRESS) {
+        close(fd);
+        return NO;
+    }
+    if (rc != 0) {
+        fd_set writable;
+        FD_ZERO(&writable);
+        FD_SET(fd, &writable);
+        struct timeval wait = { 2, 0 };
+        int err = 0;
+        socklen_t len = sizeof(err);
+        if (select(fd + 1, NULL, &writable, NULL, &wait) <= 0 ||
+            getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) != 0 || err != 0) {
+            close(fd);
+            return NO;
+        }
+    }
+    fcntl(fd, F_SETFL, flags);
+    struct timeval timeout = { 5, 0 };
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    NSMutableData *message = [[[NSString stringWithFormat:@"MBCLIP1 %lu\n", (unsigned long)data.length]
+                               dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    [message appendData:data];
+    const uint8_t *bytes = message.bytes;
+    size_t sent = 0;
+    while (sent < message.length) {
+        ssize_t n = send(fd, bytes + sent, message.length - sent, 0);
+        if (n <= 0) {
+            close(fd);
+            return NO;
+        }
+        sent += (size_t)n;
+    }
+    char reply[4] = {0};
+    size_t got = 0;
+    while (got < 3) {
+        ssize_t n = recv(fd, reply + got, 3 - got, 0);
+        if (n <= 0) {
+            break;
+        }
+        got += (size_t)n;
+    }
+    close(fd);
+    return got == 3 && memcmp(reply, "OK\n", 3) == 0;
+}
+
 // All keys and text leave in typing order (a concurrent queue could swap two fast keys)
 static dispatch_queue_t BureauInputQueue(void) {
     static dispatch_queue_t queue;
@@ -188,6 +267,8 @@ static dispatch_queue_t BureauInputQueue(void) {
     NSLayoutConstraint *_bureauFabRight;
     UIView *_bureauPrivacyBlur;
     UIView *_bureauDragRing;
+    UIView *_bureauKeyRow;          // thin key row above the keyboard (nil accessory when folded)
+    UIButton *_bureauKeyRowButton;  // small button above the menu button, unfolds the row
 #endif
 }
 
@@ -1112,6 +1193,7 @@ static NSString *const BUREAU_ORIENTATION_LOCK_KEY = @"MoonlightBureauOrientatio
 }
 
 - (void)bureauKeyboardChanged:(NSNotification *)notification {
+    [self bureauUpdateKeyRowButton];
     CGRect screenFrame = [notification.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
     UIScreen *screen = self.view.window.screen ?: UIScreen.mainScreen;
     CGRect frame = [self.view convertRect:screenFrame fromCoordinateSpace:screen.coordinateSpace];
@@ -1141,6 +1223,7 @@ static NSString *const BUREAU_ORIENTATION_LOCK_KEY = @"MoonlightBureauOrientatio
 }
 
 - (void)bureauKeyboardHidden:(NSNotification *)notification {
+    [self bureauUpdateKeyRowButton];
     _bureauKeyboardShown = NO;
     [self bureauWithKeyboardAnimation:notification changes:^{
         [self bureauUpdateKeyboardOverlap];
@@ -1212,7 +1295,8 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
                    BUREAU_VK_ESCAPE = 0x1B, BUREAU_VK_LEFT = 0x25, BUREAU_VK_UP = 0x26,
                    BUREAU_VK_RIGHT = 0x27, BUREAU_VK_DOWN = 0x28, BUREAU_VK_DELETE = 0x2E,
                    BUREAU_VK_LWIN = 0x5B, BUREAU_VK_LSHIFT = 0xA0, BUREAU_VK_LCONTROL = 0xA2,
-                   BUREAU_VK_LMENU = 0xA4;
+                   BUREAU_VK_LMENU = 0xA4, BUREAU_VK_V = 0x56;
+static NSString *const BUREAU_KEYROW_FOLDED_KEY = @"MoonlightBureauKeyRowFolded";
 
 - (UIButton *)bureauButtonWithSymbol:(NSString *)symbol title:(NSString *)title action:(SEL)action {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -1707,6 +1791,9 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
                    handler:^{ [weakSelf bureauToggleKeyboard]; }],
         [self bureauAction:@"Écrire avec correction" symbol:@"text.cursor" handler:^{ [weakSelf bureauShowComposer]; }],
         [self bureauAction:@"Coller le texte de l'iPhone" symbol:@"doc.on.clipboard" handler:^{ [weakSelf bureauPasteFromPhone]; }],
+        [self bureauAction:([defaults boolForKey:BUREAU_KEYROW_FOLDED_KEY] ? @"Afficher la barre de touches" : @"Réduire la barre de touches")
+                    symbol:([defaults boolForKey:BUREAU_KEYROW_FOLDED_KEY] ? @"chevron.up" : @"chevron.down")
+                   handler:^{ [weakSelf bureauSetKeyRowFolded:![defaults boolForKey:BUREAU_KEYROW_FOLDED_KEY]]; }],
     ]];
 
     UIMenu *shortcuts = [UIMenu menuWithTitle:@"Raccourcis" image:[UIImage systemImageNamed:@"command"] identifier:nil options:0 children:@[
@@ -1799,7 +1886,8 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
     keysScroll.translatesAutoresizingMaskIntoConstraints = NO;
     [keysScroll addSubview:keysStack];
 
-    UIStackView *line = [[UIStackView alloc] initWithArrangedSubviews:@[close, keysScroll, corrected]];
+    UIButton *fold = [self bureauButtonWithSymbol:@"chevron.down" title:@"Réduire la barre de touches" action:@selector(bureauFoldKeyRow)];
+    UIStackView *line = [[UIStackView alloc] initWithArrangedSubviews:@[close, keysScroll, corrected, fold]];
     line.axis = UILayoutConstraintAxisHorizontal;
     line.alignment = UIStackViewAlignmentCenter;
     line.spacing = 2;
@@ -1818,7 +1906,56 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
         [line.bottomAnchor constraintEqualToAnchor:row.contentView.bottomAnchor],
     ]];
     [keysScroll setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
-    _bureauKeyInput.bureauAccessory = row;
+    _bureauKeyRow = row;
+
+    // Folded: no row at all (the keyboard takes the least room), only a small round button
+    // above the menu button to bring the row back
+    _bureauKeyRowButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    _bureauKeyRowButton.translatesAutoresizingMaskIntoConstraints = NO;
+    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:15 weight:UIImageSymbolWeightSemibold];
+    [_bureauKeyRowButton setImage:[UIImage systemImageNamed:@"chevron.up" withConfiguration:config] forState:UIControlStateNormal];
+    _bureauKeyRowButton.tintColor = UIColor.whiteColor;
+    _bureauKeyRowButton.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.55];
+    _bureauKeyRowButton.layer.cornerRadius = 18;
+    _bureauKeyRowButton.layer.borderWidth = 0.5;
+    _bureauKeyRowButton.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.25].CGColor;
+    _bureauKeyRowButton.accessibilityLabel = @"Afficher la barre de touches";
+    _bureauKeyRowButton.hidden = YES;
+    [_bureauKeyRowButton addTarget:self action:@selector(bureauUnfoldKeyRow) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:_bureauKeyRowButton];
+    [NSLayoutConstraint activateConstraints:@[
+        [_bureauKeyRowButton.widthAnchor constraintEqualToConstant:36],
+        [_bureauKeyRowButton.heightAnchor constraintEqualToConstant:36],
+        [_bureauKeyRowButton.centerXAnchor constraintEqualToAnchor:_bureauFab.centerXAnchor],
+        [_bureauKeyRowButton.bottomAnchor constraintEqualToAnchor:_bureauFab.topAnchor constant:-10],
+    ]];
+    [self bureauSetKeyRowFolded:[[NSUserDefaults standardUserDefaults] boolForKey:BUREAU_KEYROW_FOLDED_KEY]];
+}
+
+- (void)bureauFoldKeyRow {
+    [self bureauSetKeyRowFolded:YES];
+}
+
+- (void)bureauUnfoldKeyRow {
+    [self bureauSetKeyRowFolded:NO];
+}
+
+// Remembered between sessions. The keyboard redraws at once, the picture follows it.
+- (void)bureauSetKeyRowFolded:(BOOL)folded {
+    [[NSUserDefaults standardUserDefaults] setBool:folded forKey:BUREAU_KEYROW_FOLDED_KEY];
+    _bureauKeyInput.bureauAccessory = folded ? nil : _bureauKeyRow;
+    if (_bureauKeyInput.isFirstResponder) {
+        [_bureauKeyInput reloadInputViews];
+    }
+    [self bureauUpdateKeyRowButton];
+}
+
+- (void)bureauUpdateKeyRowButton {
+    BOOL folded = [[NSUserDefaults standardUserDefaults] boolForKey:BUREAU_KEYROW_FOLDED_KEY];
+    _bureauKeyRowButton.hidden = !(folded && _bureauKeyInput.isFirstResponder && !_bureauFab.hidden);
+    if (!_bureauKeyRowButton.hidden) {
+        [self.view bringSubviewToFront:_bureauKeyRowButton];
+    }
 }
 
 // One typed key or a dictated / pasted string
@@ -1846,12 +1983,14 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
         _bureauFab.hidden = NO;
     }
     [_bureauKeyInput becomeFirstResponder];
+    [self bureauUpdateKeyRowButton];
 }
 
 // The stream view takes the focus back, so a Bluetooth keyboard keeps typing on the PC
 - (void)bureauHideKeyboard {
     [_bureauKeyInput resignFirstResponder];
     [_streamView becomeFirstResponder];
+    [self bureauUpdateKeyRowButton];
 }
 
 #pragma mark Drag feedback
@@ -1919,16 +2058,34 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
     [_scrollView setZoomScale:1.0 animated:YES];
 }
 
-// Confirmation against mis-taps
+// Confirmation against mis-taps, then the app closes (not back to the PC list)
 - (void)bureauDisconnect {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Se déconnecter ?"
-                                                                    message:@"La session sur le PC reste ouverte."
+                                                                    message:@"La connexion s'arrête et l'appli se ferme. Ta session reste ouverte sur le PC."
                                                              preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Annuler" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Déconnecter" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-        [self returnToMainFrame];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Se déconnecter" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        [self bureauQuitApp];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
+}
+
+// The stream stops cleanly (returnToMainFrame -> stopStream), then the app goes to the home
+// screen with the usual animation and ends. Nothing to resume at the next opening.
+- (void)bureauQuitApp {
+    Log(LOG_I, @"Moonlight Bureau: disconnect and quit the app");
+    [MainFrameViewController bureauCancelResume];
+    [self returnToMainFrame];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIApplication *app = UIApplication.sharedApplication;
+        SEL suspend = NSSelectorFromString(@"suspend");
+        if ([app respondsToSelector:suspend]) {
+            ((void (*)(id, SEL))[app methodForSelector:suspend])(app, suspend);
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            exit(0);
+        });
+    });
 }
 
 - (void)bureauKeyButton:(UIButton *)sender {
@@ -1937,11 +2094,71 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
     [self bureauSendKey:vk modifiers:modifiers];
 }
 
+// Paste: the whole text at once (PC clipboard + Ctrl+V). Line breaks never validate by
+// surprise: final ones are dropped, and a text of several lines asks how to paste it.
 - (void)bureauPasteFromPhone {
-    NSString *text = UIPasteboard.generalPasteboard.string;
-    if (text.length > 0) {
-        [self bureauSendTextToPC:text];
+    NSString *text = UIPasteboard.generalPasteboard.string ?: @"";
+    text = [[text stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"]
+            stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
+    NSRange last = [text rangeOfCharacterFromSet:[NSCharacterSet whitespaceAndNewlineCharacterSet].invertedSet
+                                         options:NSBackwardsSearch];
+    if (last.location == NSNotFound) {
+        UIAlertController *empty = [UIAlertController alertControllerWithTitle:@"Rien à coller"
+                                                                        message:@"Copie d'abord un texte sur l'iPhone."
+                                                                 preferredStyle:UIAlertControllerStyleAlert];
+        [empty addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:empty animated:YES completion:nil];
+        return;
     }
+    text = [text substringToIndex:NSMaxRange(last)];
+    if (![text containsString:@"\n"]) {
+        [self bureauPasteText:text];
+        return;
+    }
+    NSUInteger lines = [text componentsSeparatedByString:@"\n"].count;
+    NSString *oneLine = [text stringByReplacingOccurrencesOfString:@"[ \t]*\n[ \t\n]*" withString:@" "
+                                                           options:NSRegularExpressionSearch range:NSMakeRange(0, text.length)];
+    UIAlertController *ask = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"Texte de %lu lignes", (unsigned long)lines]
+                                                                 message:@"Dans une invite de commandes, un retour à la ligne peut lancer une commande. Sur une seule ligne, rien ne part tant que tu n'appuies pas sur Entrée."
+                                                          preferredStyle:UIAlertControllerStyleAlert];
+    [ask addAction:[UIAlertAction actionWithTitle:@"Garder les lignes" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [self bureauPasteText:text];
+    }]];
+    [ask addAction:[UIAlertAction actionWithTitle:@"Tout sur une ligne" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [self bureauPasteText:oneLine];
+    }]];
+    [ask addAction:[UIAlertAction actionWithTitle:@"Annuler" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:ask animated:YES completion:nil];
+}
+
+- (void)bureauPasteText:(NSString *)text {
+    NSString *active = self.streamConfig.host ?: @"";
+    NSString *address = [Utils addressPortStringToAddress:active];
+    unsigned short port = (unsigned short)([Utils addressPortStringToPort:active] - 2);
+    NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding];
+    dispatch_async(BureauInputQueue(), ^{
+        if (address.length > 0 && BureauSendToPCClipboard(address, port, data)) {
+            usleep(50 * 1000);
+            [self bureauKeyPressSync:BUREAU_VK_V modifiers:MODIFIER_CTRL];
+            return;
+        }
+        Log(LOG_W, @"Moonlight Bureau: PC clipboard helper unreachable on %@:%u", address, port);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self bureauOfferTypedPaste:text];
+        });
+    });
+}
+
+// Never a silent switch to key-by-key typing: it is slower and can mix letters up
+- (void)bureauOfferTypedPaste:(NSString *)text {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Collage d'un coup indisponible"
+                                                                   message:@"Le PC n'a pas répondu : le service de collage n'y est pas lancé. Le texte peut être tapé touche par touche à la place, plus lentement."
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Annuler" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Taper le texte" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [self bureauSendTextToPC:text];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 #pragma mark Composer

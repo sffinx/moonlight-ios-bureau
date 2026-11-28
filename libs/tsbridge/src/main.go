@@ -202,12 +202,12 @@ func MBTailscaleLogin() *C.char {
 	return C.CString(url)
 }
 
-// Sunshine ports relayed, for both bases: HTTPS, HTTP, video, control, audio, mic, RTSP
-// (offsets -5, 0, +9, +10, +11, +13, +21 from the HTTP port).
+// Sunshine ports relayed, for both bases: HTTPS, PC clipboard helper, HTTP, video, control,
+// audio, mic, RTSP (offsets -5, -2, 0, +9, +10, +11, +13, +21 from the HTTP port).
 var relayPorts = func() []int {
 	var ports []int
 	for _, base := range []int{47989, 48989} {
-		for _, off := range []int{-5, 0, 9, 10, 11, 13, 21} {
+		for _, off := range []int{-5, -2, 0, 9, 10, 11, 13, 21} {
 			ports = append(ports, base+off)
 		}
 	}
