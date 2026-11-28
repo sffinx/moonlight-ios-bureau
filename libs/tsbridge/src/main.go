@@ -22,6 +22,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -250,7 +251,18 @@ func run(dir string, hostname string, _ int, _ int) {
 	}
 	addLog("nœud Tailscale démarré")
 
-	forwardersUp := false
+	// Local ports open at once: a request made while Tailscale is still starting waits for the
+	// PC (waitTarget) instead of failing, so the app finds the PC as soon as the tailnet is up
+	if err := startForwarders(s, relayPorts); err != nil {
+		setError(err)
+	}
+	// Last PC found: taken again at once if it is online, without probing its ports
+	cacheFile := filepath.Join(dir, "pc-cible")
+	cached := ""
+	if b, err := os.ReadFile(cacheFile); err == nil {
+		cached = strings.TrimSpace(string(b))
+	}
+
 	var lastProbe time.Time
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -280,6 +292,16 @@ func run(dir string, hostname string, _ int, _ int) {
 		mu.Unlock()
 
 		if st.BackendState == "Running" {
+			if current == "" && cached != "" {
+				if name, online := peerInfo(st, cached); online {
+					mu.Lock()
+					targetIP, targetName = cached, name
+					lastError = ""
+					mu.Unlock()
+					current = cached
+					addLog("PC retrouvé : " + name)
+				}
+			}
 			// Keep the current PC while it is online; otherwise look again (every 15 s)
 			if current == "" || !peerOnline(st, current) {
 				if time.Since(lastProbe) > 15*time.Second || current != "" {
@@ -295,6 +317,8 @@ func run(dir string, hostname string, _ int, _ int) {
 					mu.Unlock()
 					if ip != "" {
 						addLog("PC trouvé : " + name)
+						cached = ip
+						os.WriteFile(cacheFile, []byte(ip), 0o600)
 					}
 				}
 			}
@@ -302,21 +326,47 @@ func run(dir string, hostname string, _ int, _ int) {
 
 		mu.Lock()
 		ready := st.BackendState == "Running" && targetIP != ""
-		forwarding = ready && forwardersUp
+		if ready && !forwarding {
+			addLog("relais actif")
+		}
+		forwarding = ready
 		mu.Unlock()
 
-		if ready && !forwardersUp {
-			if err := startForwarders(s, relayPorts); err != nil {
-				setError(err)
-			} else {
-				forwardersUp = true
-				mu.Lock()
-				forwarding = true
-				mu.Unlock()
-				addLog("relais actif")
+		// Fast while starting, then every 2 s
+		if ready {
+			time.Sleep(2 * time.Second)
+		} else {
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+}
+
+func peerInfo(st *ipnstate.Status, ip string) (string, bool) {
+	for _, p := range st.Peer {
+		for _, a := range p.TailscaleIPs {
+			if a.String() == ip {
+				return p.HostName, p.Online
 			}
 		}
-		time.Sleep(2 * time.Second)
+	}
+	return "", false
+}
+
+// The PC address for a port, waiting up to 12 s while Tailscale starts (not when it needs a
+// login: then it fails at once)
+func waitTarget(port int) (string, bool) {
+	deadline := time.Now().Add(12 * time.Second)
+	for {
+		mu.Lock()
+		ip, st, out := targetIP, state, loggedOut
+		mu.Unlock()
+		if ip != "" {
+			return net.JoinHostPort(ip, strconv.Itoa(port)), true
+		}
+		if st == "NeedsLogin" || out || time.Now().After(deadline) {
+			return "", false
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -409,8 +459,12 @@ func serveTCP(s *tsnet.Server, ln net.Listener, port int) {
 		}
 		go func(c net.Conn) {
 			defer c.Close()
+			target, ok := waitTarget(port)
+			if !ok {
+				return
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			rc, err := s.Dial(ctx, "tcp", currentTarget(port))
+			rc, err := s.Dial(ctx, "tcp", target)
 			cancel()
 			if err != nil {
 				addLog(fmt.Sprintf("TCP %d : %v", port, err))
@@ -450,6 +504,12 @@ func serveUDP(s *tsnet.Server, pc net.PacketConn, port int) {
 		rc := sessions[key]
 		smu.Unlock()
 		if rc == nil {
+			mu.Lock()
+			noTarget := targetIP == ""
+			mu.Unlock()
+			if noTarget {
+				continue // not ready yet: Moonlight sends again
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			rc, err = s.Dial(ctx, "udp", currentTarget(port))
 			cancel()

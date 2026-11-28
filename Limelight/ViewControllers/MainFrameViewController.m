@@ -37,6 +37,14 @@
 #endif
 
 #import <VideoToolbox/VideoToolbox.h>
+#if !TARGET_OS_TV
+#import <Network/Network.h>
+#import "HttpResponse.h"
+#import "HttpRequest.h"
+
+static BOOL BureauPathKnown, BureauPathExpensive, BureauPathConstrained, BureauSessionDataMode;
+static NSString *const BUREAU_DATA_OFF_KEY = @"MoonlightBureauDataModeOff";
+#endif
 
 #include <Limelight.h>
 
@@ -665,6 +673,18 @@ static NSMutableSet* hostList;
 #endif
     
     _streamConfig.bitRate = [streamSettings.bitrate intValue];
+#if !TARGET_OS_TV
+    // Moonlight Bureau data mode, decided at each connection. Same definition (text stays
+    // sharp); 60 images/s instead of 120 (a desktop does not need more, and it halves the
+    // frames to send); bitrate ceiling lowered. A still desktop costs almost nothing in HEVC:
+    // the ceiling only matters for video and scrolling.
+    BureauSessionDataMode = [MainFrameViewController bureauOnMobileData] && ![MainFrameViewController bureauDataModeOffByUser];
+    if (BureauSessionDataMode) {
+        _streamConfig.frameRate = MIN(_streamConfig.frameRate, 60);
+        _streamConfig.bitRate = MIN(_streamConfig.bitRate, [MainFrameViewController bureauDataModeBitrate]);
+        Log(LOG_I, @"Moonlight Bureau: data mode, %d FPS, %d kb/s", _streamConfig.frameRate, _streamConfig.bitRate);
+    }
+#endif
     _streamConfig.optimizeGameSettings = streamSettings.optimizeGames;
     _streamConfig.playAudioOnPC = streamSettings.playAudioOnPC;
     _streamConfig.useFramePacing = streamSettings.useFramePacing;
@@ -1310,6 +1330,171 @@ static NSMutableSet* hostList;
     [[self activeViewController] presentViewController:confirm animated:YES completion:nil];
 }
 
+#pragma mark Moonlight Bureau: data mode
+
+
+// Watches the network: mobile data or a phone hotspot ("expensive"), or iOS Low Data Mode
+// ("constrained"). Back on an ordinary Wi-Fi, a "mode off" choice is forgotten, so the
+// mode is on again next time on mobile data.
++ (void)bureauStartNetworkWatch {
+    static nw_path_monitor_t monitor;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        monitor = nw_path_monitor_create();
+        nw_path_monitor_set_queue(monitor, dispatch_get_main_queue());
+        nw_path_monitor_set_update_handler(monitor, ^(nw_path_t path) {
+            BOOL expensive = nw_path_is_expensive(path);
+            BOOL constrained = nw_path_is_constrained(path);
+            BOOL wasMobile = BureauPathExpensive || BureauPathConstrained;
+            BOOL known = BureauPathKnown;
+            BureauPathExpensive = expensive;
+            BureauPathConstrained = constrained;
+            BureauPathKnown = YES;
+            if (!expensive && !constrained) {
+                [[NSUserDefaults standardUserDefaults] removeObjectForKey:BUREAU_DATA_OFF_KEY];
+            }
+            if (known && wasMobile != (expensive || constrained)) {
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"MoonlightBureauNetworkCostChanged" object:nil];
+            }
+        });
+        nw_path_monitor_start(monitor);
+    });
+}
+
++ (BOOL)bureauOnMobileData {
+    return BureauPathExpensive || BureauPathConstrained;
+}
+
++ (BOOL)bureauDataModeOffByUser {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:BUREAU_DATA_OFF_KEY];
+}
+
++ (void)bureauSetDataModeOffByUser:(BOOL)off {
+    [[NSUserDefaults standardUserDefaults] setBool:off forKey:BUREAU_DATA_OFF_KEY];
+}
+
++ (BOOL)bureauSessionInDataMode {
+    return BureauSessionDataMode;
+}
+
+// kb/s: 6 Mb/s is enough for a sharp 1290p desktop in HEVC at 60 images/s; 4 Mb/s when iOS
+// Low Data Mode is on
++ (int)bureauDataModeBitrate {
+    return BureauPathConstrained ? 4000 : 6000;
+}
+
+#pragma mark Moonlight Bureau: close the PC session from the home screen
+
+static NSString *const BUREAU_QUIT_TYPE = @"BureauQuit";
+
++ (UIApplicationShortcutItem *)bureauQuitShortcutItem {
+    return [[UIApplicationShortcutItem alloc] initWithType:BUREAU_QUIT_TYPE
+                                            localizedTitle:@"Fermer la session du PC"
+                                         localizedSubtitle:@"Ferme le bureau ouvert à distance"
+                                                      icon:[UIApplicationShortcutIcon iconWithSystemImageName:@"xmark.circle"]
+                                                  userInfo:nil];
+}
+
++ (void)bureauUpdateQuitShortcut:(BOOL)sessionOpen {
+    NSMutableArray *items = [NSMutableArray array];
+    for (UIApplicationShortcutItem *item in [UIApplication sharedApplication].shortcutItems) {
+        if (![item.type isEqualToString:BUREAU_QUIT_TYPE]) {
+            [items addObject:item];
+        }
+    }
+    if (sessionOpen) {
+        [items insertObject:[self bureauQuitShortcutItem] atIndex:0];
+    }
+    [UIApplication sharedApplication].shortcutItems = items;
+}
+
++ (UIViewController *)bureauTopViewController {
+    UIViewController *top = [UIApplication sharedApplication].delegate.window.rootViewController;
+    while (top.presentedViewController != nil) {
+        top = top.presentedViewController;
+    }
+    return top;
+}
+
+// The app opens (iOS always opens it for a home-screen action), stops a running stream,
+// asks the PC to close the session, then goes back to the home screen by itself.
++ (void)bureauQuitSessionFromShortcut {
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"MoonlightBureauStopStreamForQuit" object:nil];
+    NSString *uuid = [[NSUserDefaults standardUserDefaults] stringForKey:@"MoonlightBureauLastHost"];
+    TemporaryHost *host = nil;
+    for (TemporaryHost *h in [[[DataManager alloc] init] getHosts]) {
+        if ((uuid != nil && [h.uuid isEqualToString:uuid]) || (uuid == nil && h.pairState == PairStatePaired)) {
+            host = h;
+            break;
+        }
+    }
+    UIAlertController *wait = [UIAlertController alertControllerWithTitle:@"Fermeture de la session du PC…"
+                                                                  message:nil
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [[self bureauTopViewController] presentViewController:wait animated:YES completion:nil];
+    });
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        // Relay first (works everywhere), then the other addresses; up to 25 s while
+        // Tailscale starts
+        NSMutableArray *addresses = [NSMutableArray array];
+        for (NSString *a in @[host.address ?: @"", host.localAddress ?: @"", host.externalAddress ?: @""]) {
+            if (a.length > 0 && ![addresses containsObject:a]) {
+                if ([a hasPrefix:@"127.0.0.1:"]) {
+                    [addresses insertObject:a atIndex:0];
+                } else {
+                    [addresses addObject:a];
+                }
+            }
+        }
+        BOOL answered = NO, closed = NO;
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:25];
+        while (host != nil && !answered && [deadline timeIntervalSinceNow] > 0) {
+            for (NSString *address in addresses) {
+                host.activeAddress = address;
+                HttpManager *hMan = [[HttpManager alloc] initWithHost:host];
+                NSURLRequest *quit = [hMan newQuitAppRequest];
+                if (quit == nil) {
+                    continue;
+                }
+                HttpResponse *response = [[HttpResponse alloc] init];
+                [hMan executeRequestSynchronously:[HttpRequest requestForResponse:response withUrlRequest:quit]];
+                if (response.statusCode >= 100 && response.statusCode != EHOSTDOWN) {
+                    answered = YES;
+                    closed = [response isStatusOk];
+                    break;
+                }
+            }
+            if (!answered) {
+                [NSThread sleepForTimeInterval:1.0];
+            }
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [wait dismissViewControllerAnimated:YES completion:^{
+                if (closed) {
+                    [self bureauUpdateQuitShortcut:NO];
+                    [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+                    UIApplication *app = UIApplication.sharedApplication;
+                    SEL suspend = NSSelectorFromString(@"suspend");
+                    if ([app respondsToSelector:suspend]) {
+                        ((void (*)(id, SEL))[app methodForSelector:suspend])(app, suspend);
+                    }
+                    return;
+                }
+                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Session non fermée"
+                    message:(answered ? @"Le PC a refusé la demande : la session est peut-être déjà fermée."
+                                      : @"Le PC ne répond pas. Vérifie qu'il est allumé et que l'accès à distance est connecté.")
+                    preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+                if (answered) {
+                    [self bureauUpdateQuitShortcut:NO];
+                }
+                [[self bureauTopViewController] presentViewController:alert animated:YES completion:nil];
+            }];
+        });
+    });
+}
+
 #pragma mark Moonlight Bureau: direct launch and resume
 
 // App closed from the app switcher with the option on: close the session on the PC
@@ -1644,6 +1829,18 @@ static NSString *const BUREAU_RESUME_KEY = @"MoonlightBureauResumeAt";
     
     if (quickActions.count < 2) {
         [quickActions removeAllObjects];
+    }
+    BOOL sessionOpen = NO;
+    @synchronized (hostList) {
+        for (TemporaryHost* host in hostList) {
+            if (host.pairState == PairStatePaired && host.state == StateOnline &&
+                host.currentGame.length > 0 && ![host.currentGame isEqualToString:@"0"]) {
+                sessionOpen = YES;
+            }
+        }
+    }
+    if (sessionOpen) {
+        [quickActions insertObject:[MainFrameViewController bureauQuitShortcutItem] atIndex:0];
     }
     [UIApplication sharedApplication].shortcutItems = quickActions;
 #endif

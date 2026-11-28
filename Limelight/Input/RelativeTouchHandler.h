@@ -18,6 +18,9 @@ NS_ASSUME_NONNULL_BEGIN
 // Moonlight Bureau: places the PC cursor where the trackpad believes it is (center at first),
 // so the first finger movement does not make it jump across the screen
 - (void)bureauSyncCursor;
+
+// YES while one finger drives the cursor: a second finger must not start the wheel or zoom
+extern BOOL BureauTrackpadSingleFingerLock;
 #endif
 
 @end

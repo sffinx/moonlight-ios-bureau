@@ -9,6 +9,7 @@
 #import "AppDelegate.h"
 #if !TARGET_OS_TV
 #import "Stream/TailscaleBridge.h"
+#import "MainFrameViewController.h"
 #endif
 
 @implementation AppDelegate
@@ -33,9 +34,17 @@ static NSString* DB_NAME = @"Limelight_iOS.sqlite";
     NSURL *support = [[NSFileManager defaultManager] URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
     NSString *tsDir = [support.path stringByAppendingPathComponent:@"tailscale"];
     MBTailscaleStart((char *)tsDir.fileSystemRepresentation, (char *)"iphone-moonlight-bureau", (char *)"pc-maison", 48984, 49010);
+    [MainFrameViewController bureauStartNetworkWatch];
 #endif
 #if !TARGET_OS_TV
     UIApplicationShortcutItem* shortcut = [launchOptions valueForKey:UIApplicationLaunchOptionsShortcutItemKey];
+    if (shortcut != nil && [shortcut.type isEqualToString:@"BureauQuit"]) {
+        [MainFrameViewController bureauCancelResume];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [MainFrameViewController bureauQuitSessionFromShortcut];
+        });
+        return NO;
+    }
     if (shortcut != nil) {
         // Static "Bureau du PC" action (Info.plist) has no UUID: last PC used
         _pcUuidToLoad = (NSString*)[shortcut.userInfo objectForKey:@"UUID"] ?: @"*";
@@ -49,6 +58,12 @@ static NSString* DB_NAME = @"Limelight_iOS.sqlite";
 
 #if !TARGET_OS_TV
 - (void)application:(UIApplication *)application performActionForShortcutItem:(UIApplicationShortcutItem *)shortcutItem completionHandler:(void (^)(BOOL succeeded))completionHandler {
+    if ([shortcutItem.type isEqualToString:@"BureauQuit"]) {
+        [MainFrameViewController bureauCancelResume];
+        [MainFrameViewController bureauQuitSessionFromShortcut];
+        completionHandler(YES);
+        return;
+    }
     _pcUuidToLoad = (NSString*)[shortcutItem.userInfo objectForKey:@"UUID"] ?: @"*";
     _shortcutCompletionHandler = completionHandler;
 }

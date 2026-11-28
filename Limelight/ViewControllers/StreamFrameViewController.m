@@ -14,6 +14,7 @@
 #import "DataManager.h"
 #import "Connection.h"
 #import "Utils.h"
+#import "RelativeTouchHandler.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -127,19 +128,19 @@ static NSString *const BUREAU_SHOW_DATA_KEY = @"MoonlightBureauShowData";
 // (Client - Téléphone\Presse-Papiers-Tel.ps1 on the PC, port = Sunshine HTTP port - 2), which
 // answers "OK"; the app then presses Ctrl+V. Typing it key by key was slow and could mix up.
 // Raw TCP with a fixed first line, so a web page cannot imitate it. Background thread only.
-static BOOL BureauSendToPCClipboard(NSString *address, unsigned short port, NSData *data) {
+static int BureauHelperConnect(NSString *address, unsigned short port) {
     struct addrinfo hints = {0};
     struct addrinfo *res = NULL;
     hints.ai_socktype = SOCK_STREAM;
     char portString[8];
     snprintf(portString, sizeof(portString), "%u", port);
     if (getaddrinfo(address.UTF8String, portString, &hints, &res) != 0 || res == NULL) {
-        return NO;
+        return -1;
     }
     int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (fd < 0) {
         freeaddrinfo(res);
-        return NO;
+        return -1;
     }
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
@@ -149,7 +150,7 @@ static BOOL BureauSendToPCClipboard(NSString *address, unsigned short port, NSDa
     freeaddrinfo(res);
     if (rc != 0 && errno != EINPROGRESS) {
         close(fd);
-        return NO;
+        return -1;
     }
     if (rc != 0) {
         fd_set writable;
@@ -161,37 +162,86 @@ static BOOL BureauSendToPCClipboard(NSString *address, unsigned short port, NSDa
         if (select(fd + 1, NULL, &writable, NULL, &wait) <= 0 ||
             getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) != 0 || err != 0) {
             close(fd);
-            return NO;
+            return -1;
         }
     }
     fcntl(fd, F_SETFL, flags);
     struct timeval timeout = { 5, 0 };
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    NSMutableData *message = [[[NSString stringWithFormat:@"MBCLIP1 %lu\n", (unsigned long)data.length]
-                               dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
-    [message appendData:data];
-    const uint8_t *bytes = message.bytes;
+    return fd;
+}
+
+static BOOL BureauHelperSend(int fd, NSData *data) {
+    const uint8_t *bytes = data.bytes;
     size_t sent = 0;
-    while (sent < message.length) {
-        ssize_t n = send(fd, bytes + sent, message.length - sent, 0);
+    while (sent < data.length) {
+        ssize_t n = send(fd, bytes + sent, data.length - sent, 0);
         if (n <= 0) {
-            close(fd);
             return NO;
         }
         sent += (size_t)n;
     }
-    char reply[4] = {0};
+    return YES;
+}
+
+static BOOL BureauHelperRead(int fd, void *buffer, size_t length) {
     size_t got = 0;
-    while (got < 3) {
-        ssize_t n = recv(fd, reply + got, 3 - got, 0);
+    while (got < length) {
+        ssize_t n = recv(fd, (uint8_t *)buffer + got, length - got, 0);
         if (n <= 0) {
-            break;
+            return NO;
         }
         got += (size_t)n;
     }
+    return YES;
+}
+
+// iPhone -> PC: the helper sets the PC clipboard and answers "OK"
+static BOOL BureauSendToPCClipboard(NSString *address, unsigned short port, NSData *data) {
+    int fd = BureauHelperConnect(address, port);
+    if (fd < 0) {
+        return NO;
+    }
+    NSMutableData *message = [[[NSString stringWithFormat:@"MBCLIP1 %lu\n", (unsigned long)data.length]
+                               dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    [message appendData:data];
+    char reply[3];
+    BOOL ok = BureauHelperSend(fd, message) && BureauHelperRead(fd, reply, 3) && memcmp(reply, "OK\n", 3) == 0;
     close(fd);
-    return got == 3 && memcmp(reply, "OK\n", 3) == 0;
+    return ok;
+}
+
+// PC -> iPhone: "MBCOPY1", the helper answers "MBTEXT <bytes>" and the PC clipboard text.
+// nil if the PC did not answer, @"" if its clipboard holds no text.
+static NSString *BureauFetchPCClipboard(NSString *address, unsigned short port) {
+    int fd = BureauHelperConnect(address, port);
+    if (fd < 0) {
+        return nil;
+    }
+    NSString *result = nil;
+    if (BureauHelperSend(fd, [@"MBCOPY1\n" dataUsingEncoding:NSUTF8StringEncoding])) {
+        char line[40];
+        size_t used = 0;
+        BOOL complete = NO;
+        while (used < sizeof(line) - 1 && BureauHelperRead(fd, line + used, 1)) {
+            if (line[used] == '\n') {
+                complete = YES;
+                break;
+            }
+            used++;
+        }
+        line[used] = 0;
+        unsigned long length = 0;
+        if (complete && sscanf(line, "MBTEXT %lu", &length) == 1 && length <= 4 * 1024 * 1024) {
+            NSMutableData *data = [NSMutableData dataWithLength:length];
+            if (length == 0 || BureauHelperRead(fd, data.mutableBytes, length)) {
+                result = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            }
+        }
+    }
+    close(fd);
+    return result;
 }
 
 // All keys and text leave in typing order (a concurrent queue could swap two fast keys)
@@ -795,6 +845,10 @@ static dispatch_queue_t BureauInputQueue(void) {
         self->_tipLabel.hidden = YES;
 #if !TARGET_OS_TV
         [self bureauSyncCursorSoon];
+        [MainFrameViewController bureauUpdateQuitShortcut:YES];
+        if ([MainFrameViewController bureauSessionInDataMode]) {
+            [self bureauShowToast:@"Mode données : image à 60 i/s, consommation réduite"];
+        }
 #endif
 
         [self->_streamView showOnScreenControls];
@@ -1295,7 +1349,7 @@ static const short BUREAU_VK_BACK = 0x08, BUREAU_VK_TAB = 0x09, BUREAU_VK_RETURN
                    BUREAU_VK_ESCAPE = 0x1B, BUREAU_VK_LEFT = 0x25, BUREAU_VK_UP = 0x26,
                    BUREAU_VK_RIGHT = 0x27, BUREAU_VK_DOWN = 0x28, BUREAU_VK_DELETE = 0x2E,
                    BUREAU_VK_LWIN = 0x5B, BUREAU_VK_LSHIFT = 0xA0, BUREAU_VK_LCONTROL = 0xA2,
-                   BUREAU_VK_LMENU = 0xA4, BUREAU_VK_V = 0x56;
+                   BUREAU_VK_LMENU = 0xA4, BUREAU_VK_V = 0x56, BUREAU_VK_C = 0x43;
 static NSString *const BUREAU_KEYROW_FOLDED_KEY = @"MoonlightBureauKeyRowFolded";
 
 - (UIButton *)bureauButtonWithSymbol:(NSString *)symbol title:(NSString *)title action:(SEL)action {
@@ -1361,6 +1415,10 @@ static NSString *const BUREAU_KEYROW_FOLDED_KEY = @"MoonlightBureauKeyRowFolded"
                                                  name:@"MoonlightBureauDragStarted" object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(bureauDragEnded)
                                                  name:@"MoonlightBureauDragEnded" object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(bureauNetworkCostChanged)
+                                                 name:@"MoonlightBureauNetworkCostChanged" object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(bureauStopForQuit)
+                                                 name:@"MoonlightBureauStopStreamForQuit" object:nil];
 
     // Phone-side mute, remembered between sessions
     BureauSetAudioMuted([[NSUserDefaults standardUserDefaults] boolForKey:BUREAU_MUTED_KEY]);
@@ -1531,6 +1589,17 @@ static NSString *const BUREAU_KEYROW_FOLDED_KEY = @"MoonlightBureauKeyRowFolded"
 }
 
 #pragma mark Two-finger wheel
+
+// One finger already drives the cursor: a second finger landing must not start the wheel or
+// the zoom (the cursor and the view jumped)
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    if ([gestureRecognizer isKindOfClass:[UIPanGestureRecognizer class]] &&
+        ((UIPanGestureRecognizer *)gestureRecognizer).minimumNumberOfTouches == 2 &&
+        BureauTrackpadSingleFingerLock) {
+        return NO;
+    }
+    return YES;
+}
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     return YES;
@@ -1791,6 +1860,8 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
                    handler:^{ [weakSelf bureauToggleKeyboard]; }],
         [self bureauAction:@"Écrire avec correction" symbol:@"text.cursor" handler:^{ [weakSelf bureauShowComposer]; }],
         [self bureauAction:@"Coller le texte de l'iPhone" symbol:@"doc.on.clipboard" handler:^{ [weakSelf bureauPasteFromPhone]; }],
+        [self bureauAction:@"Copier la sélection vers l'iPhone" symbol:@"arrow.down.doc" handler:^{ [weakSelf bureauCopyFromPC:YES]; }],
+        [self bureauAction:@"Récupérer le presse-papiers du PC" symbol:@"doc.on.doc" handler:^{ [weakSelf bureauCopyFromPC:NO]; }],
         [self bureauAction:([defaults boolForKey:BUREAU_KEYROW_FOLDED_KEY] ? @"Afficher la barre de touches" : @"Réduire la barre de touches")
                     symbol:([defaults boolForKey:BUREAU_KEYROW_FOLDED_KEY] ? @"chevron.up" : @"chevron.down")
                    handler:^{ [weakSelf bureauSetKeyRowFolded:![defaults boolForKey:BUREAU_KEYROW_FOLDED_KEY]]; }],
@@ -1824,6 +1895,13 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
                                      symbol:(locked ? @"lock.rotation.open" : @"lock.rotation")
                                     handler:^{ [weakSelf bureauToggleOrientationLock]; }]];
     [viewItems addObject:[self bureauAction:@"Données consommées" symbol:@"chart.bar" handler:^{ [weakSelf bureauShowDataUsage]; }]];
+    if ([MainFrameViewController bureauSessionInDataMode]) {
+        [viewItems addObject:[self bureauAction:@"Mode données : activé" symbol:@"antenna.radiowaves.left.and.right"
+                                        handler:^{ [weakSelf bureauAskDisableDataMode]; }]];
+    } else if ([MainFrameViewController bureauOnMobileData]) {
+        [viewItems addObject:[self bureauAction:@"Mode données : désactivé" symbol:@"antenna.radiowaves.left.and.right.slash"
+                                        handler:^{ [weakSelf bureauEnableDataMode]; }]];
+    }
     BOOL left = [defaults boolForKey:@"MoonlightBureauFabLeft"];
     [viewItems addObject:[self bureauAction:(left ? @"Mettre ce bouton à droite" : @"Mettre ce bouton à gauche")
                                      symbol:(left ? @"arrow.right.to.line" : @"arrow.left.to.line")
@@ -2131,10 +2209,16 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
     [self presentViewController:ask animated:YES completion:nil];
 }
 
-- (void)bureauPasteText:(NSString *)text {
+// The PC clipboard helper: same address as the stream, port = Sunshine HTTP port - 2
+- (NSString *)bureauHelperAddress:(unsigned short *)port {
     NSString *active = self.streamConfig.host ?: @"";
-    NSString *address = [Utils addressPortStringToAddress:active];
-    unsigned short port = (unsigned short)([Utils addressPortStringToPort:active] - 2);
+    *port = (unsigned short)([Utils addressPortStringToPort:active] - 2);
+    return [Utils addressPortStringToAddress:active];
+}
+
+- (void)bureauPasteText:(NSString *)text {
+    unsigned short port = 0;
+    NSString *address = [self bureauHelperAddress:&port];
     NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding];
     dispatch_async(BureauInputQueue(), ^{
         if (address.length > 0 && BureauSendToPCClipboard(address, port, data)) {
@@ -2147,6 +2231,135 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
             [self bureauOfferTypedPaste:text];
         });
     });
+}
+
+// PC -> iPhone. With the selection: Ctrl+C on the PC first, then its clipboard is fetched.
+- (void)bureauCopyFromPC:(BOOL)copySelection {
+    unsigned short port = 0;
+    NSString *address = [self bureauHelperAddress:&port];
+    dispatch_async(BureauInputQueue(), ^{
+        if (copySelection) {
+            [self bureauKeyPressSync:BUREAU_VK_C modifiers:MODIFIER_CTRL];
+            usleep(300 * 1000); // let the PC app fill its clipboard
+        }
+        NSString *text = address.length > 0 ? BureauFetchPCClipboard(address, port) : nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (text == nil) {
+                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Copie indisponible"
+                                                                               message:@"Le PC n'a pas répondu : le service de copier-coller n'y est pas lancé."
+                                                                        preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+                [self presentViewController:alert animated:YES completion:nil];
+            } else if (text.length == 0) {
+                [self bureauShowToast:(copySelection ? @"Rien de sélectionné sur le PC" : @"Le presse-papiers du PC est vide")];
+            } else {
+                UIPasteboard.generalPasteboard.string = text;
+                [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+                [self bureauShowToast:[NSString stringWithFormat:@"Copié sur l'iPhone (%lu caractères)", (unsigned long)text.length]];
+            }
+        });
+    });
+}
+
+// Short message at the top, gone by itself
+- (void)bureauShowToast:(NSString *)text {
+    UIVisualEffectView *box = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterialDark]];
+    box.layer.cornerRadius = 14;
+    box.clipsToBounds = YES;
+    box.userInteractionEnabled = NO;
+    box.translatesAutoresizingMaskIntoConstraints = NO;
+    UILabel *label = [[UILabel alloc] init];
+    label.text = text;
+    label.textColor = UIColor.whiteColor;
+    label.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    label.numberOfLines = 0;
+    label.textAlignment = NSTextAlignmentCenter;
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    [box.contentView addSubview:label];
+    [self.view addSubview:box];
+    [NSLayoutConstraint activateConstraints:@[
+        [label.leadingAnchor constraintEqualToAnchor:box.contentView.leadingAnchor constant:14],
+        [label.trailingAnchor constraintEqualToAnchor:box.contentView.trailingAnchor constant:-14],
+        [label.topAnchor constraintEqualToAnchor:box.contentView.topAnchor constant:9],
+        [label.bottomAnchor constraintEqualToAnchor:box.contentView.bottomAnchor constant:-9],
+        [box.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [box.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:12],
+        [box.widthAnchor constraintLessThanOrEqualToAnchor:self.view.widthAnchor constant:-40],
+    ]];
+    box.alpha = 0;
+    [UIView animateWithDuration:0.2 animations:^{
+        box.alpha = 1;
+    } completion:^(BOOL finished) {
+        [UIView animateWithDuration:0.3 delay:2.2 options:0 animations:^{
+            box.alpha = 0;
+        } completion:^(BOOL done) {
+            [box removeFromSuperview];
+        }];
+    }];
+}
+
+#pragma mark Data mode
+
+// Changing frame rate or bitrate needs a new connection: the PC session stays open and the
+// app reconnects to it at once (same path as coming back from the background)
+- (void)bureauReconnect {
+    [MainFrameViewController bureauRequestResume];
+    [self returnToMainFrame];
+}
+
+- (void)bureauAskDisableDataMode {
+    TemporarySettings *settings = [[[DataManager alloc] init] getSettings];
+    int fps = MIN([settings.framerate intValue], (int)[UIScreen mainScreen].maximumFramesPerSecond);
+    double mbps = [settings.bitrate intValue] / 1000.0;
+    double dataMbps = [MainFrameViewController bureauDataModeBitrate] / 1000.0;
+    NSString *message = [NSString stringWithFormat:@"L'image repasse à %d images/s et jusqu'à %.0f Mb/s : jusqu'à environ %.0f Go par heure en vidéo ou en défilement, contre %.0f Go au plus en mode données. Un bureau immobile consomme peu dans les deux cas.\n\nLa connexion redémarre quelques secondes. Le mode données revient tout seul après un passage en Wi-Fi.",
+                         fps, mbps, mbps * 0.45, ceil(dataMbps * 0.45)];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Désactiver le mode données ?"
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Garder le mode données" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Désactiver" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        [MainFrameViewController bureauSetDataModeOffByUser:YES];
+        [self bureauReconnect];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)bureauEnableDataMode {
+    [MainFrameViewController bureauSetDataModeOffByUser:NO];
+    [self bureauReconnect];
+}
+
+// Wi-Fi <-> mobile data during a session: propose the matching quality, never forced
+- (void)bureauNetworkCostChanged {
+    if (self.presentedViewController != nil) {
+        return;
+    }
+    BOOL mobile = [MainFrameViewController bureauOnMobileData];
+    BOOL dataMode = [MainFrameViewController bureauSessionInDataMode];
+    NSString *title = nil;
+    NSString *message = nil;
+    if (mobile && !dataMode && ![MainFrameViewController bureauDataModeOffByUser]) {
+        title = @"Données mobiles";
+        message = @"Tu n'es plus en Wi-Fi. Passer en mode données pour consommer moins ? La connexion redémarre quelques secondes.";
+    } else if (!mobile && dataMode) {
+        title = @"Wi-Fi retrouvé";
+        message = @"Repasser en pleine qualité ? La connexion redémarre quelques secondes.";
+    } else {
+        return;
+    }
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Plus tard" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Reconnecter" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [self bureauReconnect];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+// Home-screen "Fermer la session du PC" while this stream is open: stop it first
+- (void)bureauStopForQuit {
+    [MainFrameViewController bureauCancelResume];
+    [self returnToMainFrame];
 }
 
 // Never a silent switch to key-by-key typing: it is slower and can mix letters up

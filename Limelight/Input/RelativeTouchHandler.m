@@ -19,9 +19,17 @@ static const int REFERENCE_HEIGHT = 720;
 // Finger movement is measured in StreamView points, which are already divided by the zoom
 // scale: the cursor gets more precise when zoomed in. Gain goes from MIN (slow finger) to
 // MAX (fast finger, ACCEL_POINTS or more per event).
+// Gain follows the smoothed finger speed (points per second), not one event's movement: a
+// single irregular event (late, coalesced, catch-up of a held movement) no longer throws the
+// cursor. Under SLOW: 1:1; over FAST: MAX; smooth curve in between.
 static const CGFloat CURSOR_GAIN_MIN = 1.0;
 static const CGFloat CURSOR_GAIN_MAX = 2.5;
-static const CGFloat CURSOR_ACCEL_POINTS = 12.0;
+static const CGFloat CURSOR_SPEED_SLOW = 150.0;
+static const CGFloat CURSOR_SPEED_FAST = 1000.0;
+// One event moving more than this is not a finger (touch swapped by iOS): ignored
+static const CGFloat CURSOR_MAX_EVENT_POINTS = 120.0;
+
+BOOL BureauTrackpadSingleFingerLock = NO;
 
 // Fling (inertia) after lifting the finger, constants and formula of Chrome Remote Desktop
 // (Chromium remoting/client/gesture_interpreter.cc and ui/fling_tracker.cc):
@@ -55,6 +63,12 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
     CFTimeInterval flingStart;
     CGFloat flingSpeed, flingDuration, flingDirX, flingDirY;
     CGPoint flingPrevious;
+    // Like Chrome Remote Desktop (one-finger pan recognizer, its own touch): once the cursor
+    // moves with one finger, that finger alone drives it until it lifts. Another finger
+    // landing elsewhere is ignored (no wheel, zoom or click): before, the cursor and the view
+    // jumped.
+    UITouch *trackedTouch;
+    BOOL singleLocked;
 #endif
     CGPoint touchLocation, originalLocation;
     BOOL touchMoved;
@@ -163,8 +177,10 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
     CGFloat gain = 1.0;
     BOOL zoomed = view.transform.a > 1.01;
     if (!zoomed && accelerate) {
-        CGFloat speed = MIN(hypot(dx, dy) / CURSOR_ACCEL_POINTS, 1.0);
-        gain = CURSOR_GAIN_MIN + (CURSOR_GAIN_MAX - CURSOR_GAIN_MIN) * speed;
+        CGFloat t = (hypot(velocity.x, velocity.y) - CURSOR_SPEED_SLOW) / (CURSOR_SPEED_FAST - CURSOR_SPEED_SLOW);
+        t = MIN(MAX(t, 0.0), 1.0);
+        t = t * t * (3 - 2 * t);
+        gain = CURSOR_GAIN_MIN + (CURSOR_GAIN_MAX - CURSOR_GAIN_MIN) * t;
     }
     cursorLocation.x = MIN(MAX(cursorLocation.x + dx * gain, origin.x), origin.x + videoSize.width - 0.5);
     cursorLocation.y = MIN(MAX(cursorLocation.y + dy * gain, origin.y), origin.y + videoSize.height - 0.5);
@@ -179,6 +195,49 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
     [[NSNotificationCenter defaultCenter] postNotificationName:@"MoonlightBureauCursorMoved"
                                                         object:nil
                                                       userInfo:@{@"point": [NSValue valueWithCGPoint:cursorLocation]}];
+}
+#endif
+
+#if !TARGET_OS_TV
+- (void)bureauMoveWithTouch:(UITouch *)touch {
+        CGPoint currentLocation = [touch locationInView:view];
+        // Finger movement measured in window coordinates, then divided by the zoom (as
+        // Chrome Remote Desktop: inverse view transform). Measuring it in the stream view's
+        // own coordinates made a feedback loop: re-centering the zoomed image moved the view
+        // under a still finger, which moved the cursor again, which moved the image...
+        CGPoint screenLocation = [touch locationInView:nil];
+        if (screenTouch.x != screenLocation.x ||
+            screenTouch.y != screenLocation.y)
+        {
+            CGFloat zoom = MAX(view.transform.a, 1.0);
+            CGFloat dx = (screenLocation.x - screenTouch.x) / zoom, dy = (screenLocation.y - screenTouch.y) / zoom;
+            screenTouch = screenLocation;
+            CFTimeInterval now = CACurrentMediaTime();
+            CFTimeInterval dt = MAX(now - lastMoveTime, 1.0 / 240.0);
+            if (hypot(dx, dy) > CURSOR_MAX_EVENT_POINTS) {
+                lastMoveTime = now;
+                return;
+            }
+            // Smoothed velocity (points per second) for the fling
+            velocity = CGPointMake(0.6 * dx / dt + 0.4 * velocity.x, 0.6 * dy / dt + 0.4 * velocity.y);
+            lastMoveTime = now;
+            if (now - firstTouchTime < 0.12) {
+                heldMove = CGPointMake(heldMove.x + dx, heldMove.y + dy);
+            } else {
+                // Catch up the held movement gradually (35 % per event): sending it at once
+                // made the cursor, and the zoomed view that follows it, jump ("bug danse")
+                CGPoint take = heldMove;
+                if (fabs(heldMove.x) + fabs(heldMove.y) > 1) {
+                    take = CGPointMake(heldMove.x * 0.35, heldMove.y * 0.35);
+                }
+                heldMove = CGPointMake(heldMove.x - take.x, heldMove.y - take.y);
+                [self moveCursorByX:dx + take.x y:dy + take.y];
+            }
+            touchLocation = currentLocation;
+            if ([self isConfirmedMove:screenTouch from:screenOriginal]) {
+                touchMoved = true;
+            }
+        }
 }
 #endif
 
@@ -198,6 +257,16 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
 }
 
 - (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event {
+#if !TARGET_OS_TV
+    if (singleLocked && [[event allTouches] count] > [touches count]) {
+        return;
+    }
+    if ([[event allTouches] count] == [touches count]) {
+        singleLocked = NO;
+        BureauTrackpadSingleFingerLock = NO;
+        trackedTouch = [touches count] == 1 ? [touches anyObject] : nil;
+    }
+#endif
 #if !TARGET_OS_TV
     // Like iOS lists: a tap on something still moving stops it, without clicking
     if ([[event allTouches] count] == [touches count]) {
@@ -251,7 +320,22 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
 
 - (void)touchesMoved:(NSSet *)touches withEvent:(UIEvent *)event {
 #if !TARGET_OS_TV
+    if (singleLocked) {
+        if (trackedTouch != nil && [touches containsObject:trackedTouch]) {
+            [self bureauMoveWithTouch:trackedTouch];
+        }
+        return;
+    }
     if (multiTouchSequence && [[event allTouches] count] == 1) {
+        return;
+    }
+    if ([[event allTouches] count] == 1) {
+        [self bureauMoveWithTouch:[[event allTouches] anyObject]];
+        if (touchMoved && !multiTouchSequence) {
+            singleLocked = YES;
+            BureauTrackpadSingleFingerLock = YES;
+            trackedTouch = [[event allTouches] anyObject];
+        }
         return;
     }
 #endif
@@ -259,41 +343,7 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
         UITouch *touch = [[event allTouches] anyObject];
         CGPoint currentLocation = [touch locationInView:view];
         
-#if !TARGET_OS_TV
-        // Finger movement measured in window coordinates, then divided by the zoom (as
-        // Chrome Remote Desktop: inverse view transform). Measuring it in the stream view's
-        // own coordinates made a feedback loop: re-centering the zoomed image moved the view
-        // under a still finger, which moved the cursor again, which moved the image...
-        CGPoint screenLocation = [touch locationInView:nil];
-        if (screenTouch.x != screenLocation.x ||
-            screenTouch.y != screenLocation.y)
-        {
-            CGFloat zoom = MAX(view.transform.a, 1.0);
-            CGFloat dx = (screenLocation.x - screenTouch.x) / zoom, dy = (screenLocation.y - screenTouch.y) / zoom;
-            screenTouch = screenLocation;
-            CFTimeInterval now = CACurrentMediaTime();
-            CFTimeInterval dt = MAX(now - lastMoveTime, 0.001);
-            // Smoothed velocity (points per second) for the fling
-            velocity = CGPointMake(0.6 * dx / dt + 0.4 * velocity.x, 0.6 * dy / dt + 0.4 * velocity.y);
-            lastMoveTime = now;
-            if (now - firstTouchTime < 0.12) {
-                heldMove = CGPointMake(heldMove.x + dx, heldMove.y + dy);
-            } else {
-                // Catch up the held movement gradually (35 % per event): sending it at once
-                // made the cursor, and the zoomed view that follows it, jump ("bug danse")
-                CGPoint take = heldMove;
-                if (fabs(heldMove.x) + fabs(heldMove.y) > 1) {
-                    take = CGPointMake(heldMove.x * 0.35, heldMove.y * 0.35);
-                }
-                heldMove = CGPointMake(heldMove.x - take.x, heldMove.y - take.y);
-                [self moveCursorByX:dx + take.x y:dy + take.y];
-            }
-            touchLocation = currentLocation;
-            if ([self isConfirmedMove:screenTouch from:screenOriginal]) {
-                touchMoved = true;
-            }
-        }
-#else
+#if TARGET_OS_TV
         if (touchLocation.x != currentLocation.x ||
             touchLocation.y != currentLocation.y)
         {
@@ -336,6 +386,36 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
 }
 
 - (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event {
+#if !TARGET_OS_TV
+    BOOL lastFingers = [[event allTouches] count] == [touches count];
+    if (singleLocked && !lastFingers) {
+        // Another finger lifted: nothing. The tracked finger lifted first: the other one,
+        // still down, does nothing until all fingers are up.
+        if (trackedTouch != nil && [touches containsObject:trackedTouch]) {
+            trackedTouch = nil;
+            [dragTimer invalidate];
+            dragTimer = nil;
+            if (isDragging) {
+                isDragging = false;
+                LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"MoonlightBureauDragEnded" object:nil];
+            }
+        }
+        return;
+    }
+    if (singleLocked && lastFingers) {
+        singleLocked = NO;
+        BureauTrackpadSingleFingerLock = NO;
+        if (trackedTouch == nil || ![touches containsObject:trackedTouch]) {
+            // The tracked finger was already up: no fling, no click
+            trackedTouch = nil;
+            heldMove = CGPointZero;
+            touchMoved = true;
+            peakTouchCount = 0;
+        }
+        trackedTouch = nil;
+    }
+#endif
     [dragTimer invalidate];
     dragTimer = nil;
 #if !TARGET_OS_TV
@@ -412,6 +492,13 @@ static const CFTimeInterval FLING_MAX_IDLE = 0.05;  // finger must still be movi
 }
 
 - (void)touchesCancelled:(NSSet *)touches withEvent:(UIEvent *)event {
+#if !TARGET_OS_TV
+    if ([[event allTouches] count] == [touches count]) {
+        singleLocked = NO;
+        BureauTrackpadSingleFingerLock = NO;
+        trackedTouch = nil;
+    }
+#endif
     [dragTimer invalidate];
     dragTimer = nil;
     if (isDragging) {

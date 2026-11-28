@@ -26,6 +26,18 @@
 // Moonlight Bureau: reconnect when the app comes back from the background
 + (void)bureauRequestResume;
 + (void)bureauCancelResume;
+
+// Data mode: on mobile data (or iOS Low Data Mode), 60 images/s and a lower bitrate ceiling
++ (void)bureauStartNetworkWatch;
++ (BOOL)bureauOnMobileData;
++ (BOOL)bureauDataModeOffByUser;
++ (void)bureauSetDataModeOffByUser:(BOOL)off;
++ (BOOL)bureauSessionInDataMode;
++ (int)bureauDataModeBitrate;
+
+// Home-screen action "Fermer la session du PC", shown only while a session is open
++ (void)bureauUpdateQuitShortcut:(BOOL)sessionOpen;
++ (void)bureauQuitSessionFromShortcut;
 #endif
 
 @end

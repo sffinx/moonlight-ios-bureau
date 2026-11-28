@@ -80,7 +80,20 @@ static const float POLL_RATE = 2.0f; // Poll every 2 seconds
         }
     }
     
-    return array;
+    // Moonlight Bureau: the in-app Tailscale relay (127.0.0.1) first. It works everywhere, and
+    // trying a home address first on 4G/5G cost a 5 s timeout per address at each launch.
+    NSMutableArray *ordered = [NSMutableArray array];
+    for (NSString *a in array) {
+        if ([a hasPrefix:@"127.0.0.1:"]) {
+            [ordered addObject:a];
+        }
+    }
+    for (NSString *a in array) {
+        if (![a hasPrefix:@"127.0.0.1:"]) {
+            [ordered addObject:a];
+        }
+    }
+    return ordered;
 }
 
 - (void) discoverHost {
