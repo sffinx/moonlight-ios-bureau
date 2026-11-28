@@ -2173,8 +2173,9 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
     [self bureauSendKey:vk modifiers:modifiers];
 }
 
-// Paste: the whole text at once (PC clipboard + Ctrl+V). Line breaks never validate by
-// surprise: final ones are dropped, and a text of several lines asks how to paste it.
+// Paste: the whole text at once (PC clipboard + Ctrl+V), line breaks kept as they are. A
+// paste inserts them as new lines in a text field: they never act as Enter, so a chat app
+// does not send the message halfway. Only final blank lines are dropped.
 - (void)bureauPasteFromPhone {
     NSString *text = UIPasteboard.generalPasteboard.string ?: @"";
     text = [[text stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"]
@@ -2190,31 +2191,7 @@ static const CGFloat BUREAU_SCROLL_FLING_MIN = 40;       // points per second
         return;
     }
     text = [text substringToIndex:NSMaxRange(last)];
-    if (![text containsString:@"\n"]) {
-        [self bureauPasteText:text];
-        return;
-    }
-    NSUInteger lines = [text componentsSeparatedByString:@"\n"].count;
-    NSString *oneLine = [text stringByReplacingOccurrencesOfString:@"[ \t]*\n[ \t\n]*" withString:@" "
-                                                           options:NSRegularExpressionSearch range:NSMakeRange(0, text.length)];
-    UIAlertController *ask = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"Texte de %lu lignes", (unsigned long)lines]
-                                                                 message:@"Dans une invite de commandes, un retour à la ligne peut lancer une commande. Sur une seule ligne, rien ne part tant que tu n'appuies pas sur Entrée."
-                                                          preferredStyle:UIAlertControllerStyleAlert];
-    [ask addAction:[UIAlertAction actionWithTitle:@"Garder les lignes" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [self bureauPasteText:text];
-    }]];
-    [ask addAction:[UIAlertAction actionWithTitle:@"Tout sur une ligne" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [self bureauPasteText:oneLine];
-    }]];
-    [ask addAction:[UIAlertAction actionWithTitle:@"Annuler" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:ask animated:YES completion:nil];
-}
-
-// The PC clipboard helper: same address as the stream, port = Sunshine HTTP port - 2
-- (NSString *)bureauHelperAddress:(unsigned short *)port {
-    NSString *active = self.streamConfig.host ?: @"";
-    *port = (unsigned short)([Utils addressPortStringToPort:active] - 2);
-    return [Utils addressPortStringToAddress:active];
+    [self bureauPasteText:text];
 }
 
 - (void)bureauPasteText:(NSString *)text {
